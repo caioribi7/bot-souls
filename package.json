@@ -1,0 +1,11 @@
+{
+  "name": "discord-community-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot Discord (Python/discord.py) — dependências em requirements.txt.",
+  "main": "bot.py",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "python3 bot.py"
+  }
+}
