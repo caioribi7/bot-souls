@@ -70,6 +70,8 @@ class GuideView(discord.ui.View):
                     "`/banco ranking` - top ricos",
                     "`/coinsdiarias` - resgate diário",
                     "`/apostar blackjack valor` - blackjack",
+                    "`/apostar bombinha valor` - 💣 Mines (Bombinha)",
+                    "`/apostar foguetinho valor multiplicador_alvo` - 🚀 crash (Foguetinho)",
                     "`/apostar roleta valor aposta` - roleta",
                     "`/pix` - compra de coins via Pix",
                 ]

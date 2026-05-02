@@ -15,6 +15,14 @@ from config import (
     WARNING_COLOR,
 )
 
+from .mines_foguetinho_helpers import (
+    MINES_BOMBS,
+    MINES_TOTAL,
+    MinesBombinhaView,
+    mines_embed as bombinha_embed,
+    sample_foguetinho_crash,
+)
+
 COIN_NAME = "Sweet Coins"
 SWEET_COIN_EMOJI = "🍬"
 
@@ -307,6 +315,7 @@ class Economy(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._games: dict[int, dict] = {}
+        self._mines_sessions: dict[int, dict] = {}
 
     # ── /banco group ──────────────────────────────────────────────────────────
 
@@ -571,6 +580,14 @@ class Economy(commands.Cog):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
+        if user_id in self._mines_sessions:
+            embed = discord.Embed(
+                description="Você já tem uma **Bombinha** em andamento! Termine ou espere acabar primeiro.",
+                color=WARNING_COLOR,
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
         if valor < 10:
             embed = discord.Embed(
                 description="A aposta mínima é de {SWEET_COIN_EMOJI} **10 Sweet Coins**.".format(
@@ -685,6 +702,219 @@ class Economy(commands.Cog):
 
         await interaction.followup.send(embed=embed, view=view)
 
+    @apostar_group.command(
+        name="bombinha",
+        description="Estilo Mines: abra número sem bomba. 3 bombas em 20 casas.",
+    )
+    @app_commands.describe(valor="Valor da aposta (mínimo 10, máximo 50.000)")
+    async def bombinha_cmd(self, interaction: discord.Interaction, valor: int):
+        await interaction.response.defer()
+        user_id = interaction.user.id
+
+        if user_id in self._mines_sessions:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description="Você já tem uma Bombinha rodando.",
+                    color=WARNING_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+        if user_id in self._games:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description="Termine o Blackjack primeiro.",
+                    color=WARNING_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if valor < 10:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=f"A aposta mínima é de {SWEET_COIN_EMOJI} **10** Sweet Coins.",
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+        if valor > 50_000:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=(
+                        "A aposta máxima é de "
+                        f"{SWEET_COIN_EMOJI} **50.000** Sweet Coins."
+                    ),
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        db = self.bot.db
+        if not await db.deduct_coins(user_id, interaction.guild_id, valor):
+            ud = await db.get_user(user_id, interaction.guild_id)
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=(
+                        f"Saldo insuficiente. Você tem {SWEET_COIN_EMOJI} **{ud['balance']:,}** "
+                        f"e tentou {SWEET_COIN_EMOJI} **{valor:,}**."
+                    ),
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        bombs_idx = set(random.sample(range(MINES_TOTAL), MINES_BOMBS))
+        game: dict = {
+            "bombs": bombs_idx,
+            "revealed_safe": set(),
+            "bet": valor,
+            "mult": 1.0,
+            "boom_idx": None,
+            "bomb_count": MINES_BOMBS,
+            "finished": None,
+            "channel_id": interaction.channel_id,
+            "message_id": None,
+        }
+        view = MinesBombinhaView(self, user_id, interaction.guild_id, game)
+        embed = bombinha_embed(game)
+        msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+        game["message_id"] = msg.id
+        self._mines_sessions[user_id] = game
+
+    @apostar_group.command(
+        name="foguetinho",
+        description="Foguetinho (crash): defina onde quer sacar. Se crashar antes, perde.",
+    )
+    @app_commands.describe(
+        valor="Valor da aposta (mínimo 10, máximo 50.000)",
+        multiplicador_alvo=(
+            "Alvo onde você “saca” antes do crash ex.: 1.50 até 10.00 (mínimo 1.05)"
+        ),
+    )
+    async def foguetinho_cmd(
+        self,
+        interaction: discord.Interaction,
+        valor: int,
+        multiplicador_alvo: float,
+    ):
+        await interaction.response.defer()
+        user_id = interaction.user.id
+
+        if user_id in self._games:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description="Termine o Blackjack antes de jogar **Foguetinho**.",
+                    color=WARNING_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+        if user_id in self._mines_sessions:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description="Termine ou encerre sua **Bombinha** antes.",
+                    color=WARNING_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        meta = round(float(multiplicador_alvo), 2)
+
+        if valor < 10:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=(
+                        "A aposta mínima é de "
+                        f"{SWEET_COIN_EMOJI} **10** Sweet Coins."
+                    ),
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+        if valor > 50_000:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=(
+                        "A aposta máxima é de "
+                        f"{SWEET_COIN_EMOJI} **50.000** Sweet Coins."
+                    ),
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+        if meta < 1.05 or meta > 10.0:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description="O multiplicador alvo deve ficar entre **1.05** e **10.00**.",
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        db = self.bot.db
+        if not await db.deduct_coins(user_id, interaction.guild_id, valor):
+            ud = await db.get_user(user_id, interaction.guild_id)
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=(
+                        f"Saldo insuficiente. Você tem {SWEET_COIN_EMOJI} **{ud['balance']:,}** "
+                        f"e tentou {SWEET_COIN_EMOJI} **{valor:,}**."
+                    ),
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        crash = sample_foguetinho_crash()
+        await asyncio.sleep(1)
+
+        if meta < crash:
+            payout = int(round(valor * meta))
+            if payout <= 0:
+                payout = valor
+
+            await db.add_coins(user_id, interaction.guild_id, payout)
+            net = payout - valor
+            emb = discord.Embed(
+                title="🚀 Foguetinho — Boa!",
+                description=(
+                    f"O foguetinho **voou até ×{crash:,.2f}** antes de estourar.\n"
+                    f"Seu alvo (**×{meta:,.2f}**) ficou dentro do limite!"
+                ),
+                color=SUCCESS_COLOR,
+            )
+            emb.add_field(
+                name="Ganhou",
+                value=f"+{SWEET_COIN_EMOJI} **{net:,}** — total creditado **{payout:,}**",
+                inline=False,
+            )
+        else:
+            emb = discord.Embed(
+                title="🚀 Foguetinho — Estourou antes!",
+                description=(
+                    f"O foguetinho parou em **×{crash:,.2f}** antes do seu alvo (**×{meta:,.2f}**).\n"
+                    f"Você perdeu sua aposta de {SWEET_COIN_EMOJI} **{valor:,}**."
+                ),
+                color=ERROR_COLOR,
+            )
+
+        emb.add_field(
+            name="Resultado técnico",
+            value=f"Crash: ×{crash:,.2f} • seu alvo: ×{meta:,.2f}",
+            inline=False,
+        )
+        emb.set_footer(text="Ganhar = alvo menor que o ponto de crash.")
+        await interaction.followup.send(embed=emb)
+
     @apostar_group.command(name="roleta", description="Jogue roleta europeia com Sweet Coins")
     @app_commands.describe(
         valor="Valor da aposta (mínimo 10)",
@@ -698,6 +928,25 @@ class Economy(commands.Cog):
     ):
         await interaction.response.defer()
         user_id = interaction.user.id
+
+        if user_id in self._games:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description="Termine o **Blackjack** antes da roleta.",
+                    color=WARNING_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+        if user_id in self._mines_sessions:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description="Termine sua **Bombinha** antes da roleta.",
+                    color=WARNING_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
 
         if valor < 10:
             embed = discord.Embed(
