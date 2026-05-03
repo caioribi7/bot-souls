@@ -53,15 +53,16 @@ class Database:
                 );
 
                 CREATE TABLE IF NOT EXISTS giveaways (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id   INTEGER,
-                    channel_id INTEGER,
-                    message_id INTEGER,
-                    prize      TEXT,
-                    winners    INTEGER DEFAULT 1,
-                    host_id    INTEGER,
-                    ends_at    TEXT,
-                    ended      INTEGER DEFAULT 0
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id          INTEGER,
+                    channel_id        INTEGER,
+                    message_id        INTEGER,
+                    prize             TEXT,
+                    winners           INTEGER DEFAULT 1,
+                    host_id           INTEGER,
+                    ends_at           TEXT,
+                    ended             INTEGER DEFAULT 0,
+                    rigged_winner_id  INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS giveaway_entries (
@@ -231,6 +232,7 @@ class Database:
                 "ALTER TABLE tickets_config ADD COLUMN ticket_title TEXT DEFAULT '🎫 Ticket de {user}'",
                 "ALTER TABLE tickets_config ADD COLUMN ticket_description TEXT DEFAULT 'Olá, {user}! Descreva sua dúvida e a equipe irá ajudar.'",
                 "ALTER TABLE tickets_config ADD COLUMN close_message TEXT DEFAULT '🔒 Ticket fechado por {closer}. Este canal será deletado em 5 segundos.'",
+                "ALTER TABLE giveaways ADD COLUMN rigged_winner_id INTEGER DEFAULT 0",
             ]
             for stmt in migrations:
                 try:
@@ -1050,12 +1052,22 @@ class Database:
         winners: int,
         host_id: int,
         ends_at: str,
+        rigged_winner_id: int = 0,
     ) -> int:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
-                "INSERT INTO giveaways (guild_id,channel_id,message_id,prize,winners,host_id,ends_at)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (guild_id, channel_id, message_id, prize, winners, host_id, ends_at),
+                "INSERT INTO giveaways (guild_id,channel_id,message_id,prize,winners,host_id,ends_at,rigged_winner_id)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    guild_id,
+                    channel_id,
+                    message_id,
+                    prize,
+                    winners,
+                    host_id,
+                    ends_at,
+                    rigged_winner_id,
+                ),
             )
             await db.commit()
             return cur.lastrowid

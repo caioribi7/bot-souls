@@ -26,6 +26,25 @@ def parse_duration(s: str) -> int | None:
     return total if total > 0 else None
 
 
+def pick_giveaway_winners(ga: dict, entries: list[int]) -> list[int]:
+    """Escolhe ganhadores; se `rigged_winner_id` > 0, esse usuário entra sempre na lista."""
+    want = max(1, int(ga.get("winners") or 1))
+    rigged = int(ga.get("rigged_winner_id") or 0)
+
+    if rigged <= 0:
+        if not entries:
+            return []
+        return random.sample(entries, min(want, len(entries)))
+
+    winners: list[int] = [rigged]
+    pool = [e for e in entries if e != rigged]
+    need = want - 1
+    if need > 0 and pool:
+        take = min(need, len(pool))
+        winners.extend(random.sample(pool, take))
+    return winners[:want]
+
+
 def format_remaining(ends_at: str) -> str:
     dt = datetime.fromisoformat(ends_at)
     diff = dt - datetime.utcnow()
@@ -132,14 +151,19 @@ class Giveaway(commands.Cog):
         guild = self.bot.get_guild(ga["guild_id"])
         winner_ids = []
 
-        if entries:
-            chosen = random.sample(entries, min(ga["winners"], len(entries)))
+        chosen = pick_giveaway_winners(ga, entries)
+        if chosen:
             for uid in chosen:
                 member = guild.get_member(uid) if guild else None
                 if member:
                     winner_ids.append(member.mention)
                 else:
                     winner_ids.append(f"<@{uid}>")
+
+        if not winner_ids:
+            rigged = int(ga.get("rigged_winner_id") or 0)
+            if rigged > 0:
+                winner_ids.append(f"<@{rigged}>")
 
         # Edit original message
         try:
@@ -180,6 +204,86 @@ class Giveaway(commands.Cog):
             )
         else:
             await channel.send("❌ Nenhum participante no sorteio. Sem ganhadores.")
+
+    # ── /msorteio (staff — vencedor garantido na lista final) ────────────────
+
+    @app_commands.command(
+        name="msorteio",
+        description="[Staff] Sorteio que inclui sempre o membro escolhido entre os ganhadores.",
+    )
+    @app_commands.describe(
+        premio="Prêmio (mensagem pública igual ao sorteio normal)",
+        duracao="Duração (ex: 1d, 2h30m, 45m)",
+        vencedor="Membro que será incluído como ganhador ao encerrar",
+        ganhadores="Total de ganhadores (≥1)",
+        canal="Canal do sorteio (padrão: atual)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def msorteio(
+        self,
+        interaction: discord.Interaction,
+        premio: str,
+        duracao: str,
+        vencedor: discord.Member,
+        ganhadores: int = 1,
+        canal: discord.TextChannel | None = None,
+    ):
+        seconds = parse_duration(duracao)
+        if not seconds:
+            await interaction.response.send_message(
+                "❌ Duração inválida. Use: `1d`, `2h`, `30m`, `1h30m`, etc.",
+                ephemeral=True,
+            )
+            return
+
+        if ganhadores < 1:
+            await interaction.response.send_message(
+                "❌ Número de ganhadores deve ser ≥ 1.", ephemeral=True
+            )
+            return
+
+        if vencedor.bot:
+            await interaction.response.send_message(
+                "❌ Escolha um membro humano, não um bot.", ephemeral=True,
+            )
+            return
+
+        target_channel = canal or interaction.channel
+        if not isinstance(target_channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "❌ Use um canal de texto.", ephemeral=True,
+            )
+            return
+
+        ends_at = (datetime.utcnow() + timedelta(seconds=seconds)).isoformat()
+
+        await interaction.response.send_message(
+            "✅ Sorteio criado. A mensagem pública é igual à do `/sorteio criar`; "
+            "só esta linha é visível para você.",
+            ephemeral=True,
+        )
+
+        db = self.bot.db
+        ga_id = await db.create_giveaway(
+            guild_id=interaction.guild_id,
+            channel_id=target_channel.id,
+            message_id=0,
+            prize=premio,
+            winners=ganhadores,
+            host_id=interaction.user.id,
+            ends_at=ends_at,
+            rigged_winner_id=vencedor.id,
+        )
+
+        ga = await db.get_giveaway(ga_id)
+        embed = build_giveaway_embed(ga, 0)
+        view = GiveawayEntryView(ga_id, db)
+
+        msg = await target_channel.send(embed=embed, view=view)
+        await db.update_giveaway_message(ga_id, msg.id)
+
+        task = asyncio.create_task(self._giveaway_timer(ga_id, seconds))
+        self._active_tasks[ga_id] = task
 
     # ── /sorteio criar ────────────────────────────────────────────────────
 
