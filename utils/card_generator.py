@@ -450,3 +450,138 @@ async def generate_leaderboard_card(
     card.convert("RGB").save(out, format="PNG", optimize=True)
     out.seek(0)
     return out
+
+
+async def generate_shop_card(
+    guild_name: str,
+    guild_icon_url: str,
+    items: list[dict],
+    custom_role_price: int,
+    theme: str = "escuro",
+) -> io.BytesIO:
+    """Generate a visual shop panel image. Returns PNG BytesIO."""
+    regular = [i for i in items if not i.get("is_custom")]
+
+    ROW_H   = 72
+    WIDTH   = 800
+    HDR_H   = 86
+    FTR_H   = 36
+
+    custom_row = {
+        "name": "Cargo Personalizado",
+        "price": custom_role_price,
+        "emoji": "✨",
+        "description": "Crie seu proprio cargo com nome e cor personalizada!",
+        "xp_multiplier": 1.0,
+        "_custom": True,
+    }
+    all_rows: list[dict] = regular + [custom_row]
+    height = HDR_H + len(all_rows) * ROW_H + FTR_H
+
+    t = THEMES.get(theme, THEMES["escuro"])
+
+    fonts = {
+        "title":  _font(_BOLD,    23),
+        "sub":    _font(_REGULAR, 13),
+        "name":   _font(_BOLD,    17),
+        "price":  _font(_BOLD,    14),
+        "desc":   _font(_REGULAR, 13),
+        "badge":  _font(_BOLD,    12),
+        "footer": _font(_REGULAR, 12),
+    }
+
+    icon_bytes = await _fetch_raw(guild_icon_url)
+    icon_img: Image.Image | None = None
+    if icon_bytes:
+        try:
+            icon_img = _circle_crop(Image.open(io.BytesIO(icon_bytes)).convert("RGBA"), 56)
+        except Exception:
+            pass
+
+    card = Image.new("RGBA", (WIDTH, height), t["bg"] + (255,))
+    draw = ImageDraw.Draw(card)
+
+    # ── Header gradient (gold → orange) ──────────────────────────────────────
+    c1 = (255, 186,  0)
+    c2 = (255,  90,  0)
+    for x in range(WIDTH):
+        k = x / max(1, WIDTH - 1)
+        rc = int(c1[0] * (1 - k) + c2[0] * k)
+        gc = int(c1[1] * (1 - k) + c2[1] * k)
+        bc = int(c1[2] * (1 - k) + c2[2] * k)
+        draw.line([(x, 0), (x, HDR_H)], fill=(rc, gc, bc, 255))
+
+    if icon_img:
+        iy = (HDR_H - 56) // 2
+        card.paste(icon_img, (16, iy), icon_img)
+
+    title = "LOJA DE CARGOS"
+    tw = _tw(draw, title, fonts["title"])
+    draw.text(((WIDTH - tw) // 2, 12), title, font=fonts["title"], fill=(255, 255, 255, 255))
+
+    n = len(regular)
+    sub = (
+        f"{n} {'item' if n == 1 else 'itens'} disponíveis"
+        f"  •  Personalizado: {custom_role_price:,} moedas"
+    )
+    stw = _tw(draw, sub, fonts["sub"])
+    draw.text(((WIDTH - stw) // 2, 48), sub, font=fonts["sub"], fill=(255, 244, 200, 215))
+
+    # ── Item rows ─────────────────────────────────────────────────────────────
+    y = HDR_H
+    for idx, item in enumerate(all_rows):
+        alt = idx % 2 == 1
+        bg_c = (t["bg"][0] + 9, t["bg"][1] + 9, t["bg"][2] + 12, 255) if alt else (t["bg"][0], t["bg"][1], t["bg"][2], 255)
+        draw.rectangle([(0, y), (WIDTH, y + ROW_H)], fill=bg_c)
+
+        if item.get("_custom"):
+            accent = (155, 89, 182)
+        elif (item.get("xp_multiplier") or 1.0) > 1.0:
+            accent = (255, 183,   0)
+        else:
+            accent = (88, 101, 242)
+
+        draw.rectangle([(0, y), (4, y + ROW_H)], fill=accent + (255,))
+
+        dr = 13
+        dcx, dcy = 24, y + ROW_H // 2
+        draw.ellipse([(dcx - dr, dcy - dr), (dcx + dr, dcy + dr)], fill=accent + (195,))
+
+        name_text = str(item.get("name", ""))[:32]
+        draw.text((52, y + 12), name_text, font=fonts["name"], fill=t["text"])
+
+        desc_text = str(item.get("description") or "")[:72]
+        if desc_text:
+            draw.text((52, y + 38), desc_text, font=fonts["desc"], fill=t["bio"])
+
+        price = item.get("price", 0)
+        price_str = f"{price:,} moedas"
+        pw = _tw(draw, price_str, fonts["price"])
+        bw = pw + 24
+        bx = WIDTH - bw - 16
+        by = y + (ROW_H - 28) // 2
+        draw.rounded_rectangle([bx, by, bx + bw, by + 28], radius=14, fill=(255, 186, 0, 220))
+        draw.text((bx + 12, by + 6), price_str, font=fonts["price"], fill=(30, 18, 0, 255))
+
+        xp = item.get("xp_multiplier") or 1.0
+        if xp > 1.0 and not item.get("_custom"):
+            xp_str = f"XP x{xp:.1f}"
+            xw = _tw(draw, xp_str, fonts["badge"])
+            xbx = bx - xw - 28
+            xby = by
+            draw.rounded_rectangle([xbx, xby, xbx + xw + 16, xby + 28], radius=14, fill=(57, 242, 135, 205))
+            draw.text((xbx + 8, xby + 6), xp_str, font=fonts["badge"], fill=(8, 50, 18, 255))
+
+        draw.line([(6, y + ROW_H - 1), (WIDTH - 6, y + ROW_H - 1)], fill=accent + (22,))
+        y += ROW_H
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    draw.rectangle([(0, height - FTR_H), (WIDTH, height)], fill=(0, 0, 0, 38))
+    footer = f"Community Bot  •  {guild_name}"[:65]
+    ftw = _tw(draw, footer, fonts["footer"])
+    draw.text(((WIDTH - ftw) // 2, height - FTR_H + 11), footer, font=fonts["footer"], fill=t["subtext"])
+
+    buf = io.BytesIO()
+    card.convert("RGB").save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf

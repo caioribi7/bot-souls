@@ -88,16 +88,17 @@ class BlackjackView(discord.ui.View):
         game = self.cog._games.pop(self.user_id, None)
         if game is None:
             return
-        interaction: discord.Interaction = game["interaction"]
         embed = discord.Embed(
             title="🃏 Blackjack — Tempo esgotado",
             description="Você demorou demais para jogar. A aposta foi perdida.",
             color=ERROR_COLOR,
         )
-        try:
-            await interaction.edit_original_response(embed=embed, view=None)
-        except discord.HTTPException:
-            pass
+        msg = game.get("message")
+        if msg is not None:
+            try:
+                await msg.edit(embed=embed, view=None)
+            except discord.HTTPException:
+                pass
 
     def _build_game_embed(self, game: dict, *, reveal: bool = False, color: int = BOT_COLOR) -> discord.Embed:
         dealer_cards = game["dealer"]
@@ -170,10 +171,17 @@ class BlackjackView(discord.ui.View):
                 inline=True,
             )
 
+        # Prefer editing via the button interaction (edits the game message directly).
+        # Fall back to the stored WebhookMessage if needed.
         try:
             await interaction.edit_original_response(embed=embed, view=None)
         except discord.HTTPException:
-            pass
+            msg = game.get("message")
+            if msg is not None:
+                try:
+                    await msg.edit(embed=embed, view=None)
+                except discord.HTTPException:
+                    pass
 
     @discord.ui.button(label="🃏 Pedir", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -205,13 +213,23 @@ class BlackjackView(discord.ui.View):
             try:
                 await interaction.edit_original_response(embed=embed, view=None)
             except discord.HTTPException:
-                pass
+                msg = game.get("message")
+                if msg:
+                    try:
+                        await msg.edit(embed=embed, view=None)
+                    except discord.HTTPException:
+                        pass
         else:
             embed = self._build_game_embed(game, color=BOT_COLOR)
             try:
                 await interaction.edit_original_response(embed=embed, view=self)
             except discord.HTTPException:
-                pass
+                msg = game.get("message")
+                if msg:
+                    try:
+                        await msg.edit(embed=embed, view=self)
+                    except discord.HTTPException:
+                        pass
 
     @discord.ui.button(label="✋ Parar", style=discord.ButtonStyle.secondary)
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -270,7 +288,12 @@ class BlackjackView(discord.ui.View):
             try:
                 await interaction.edit_original_response(embed=embed, view=None)
             except discord.HTTPException:
-                pass
+                msg = game.get("message")
+                if msg:
+                    try:
+                        await msg.edit(embed=embed, view=None)
+                    except discord.HTTPException:
+                        pass
             return
 
         await self._dealer_play_and_resolve(interaction, game)
@@ -680,7 +703,6 @@ class Economy(commands.Cog):
                 await interaction.followup.send(embed=embed)
             return
 
-        self._games[user_id] = game
         view = BlackjackView(self, user_id)
 
         dealer_display = f"{card_str(dealer_hand[0])} 🂠"
@@ -700,7 +722,9 @@ class Economy(commands.Cog):
             inline=True,
         )
 
-        await interaction.followup.send(embed=embed, view=view)
+        msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+        game["message"] = msg
+        self._games[user_id] = game
 
     @apostar_group.command(
         name="bombinha",
