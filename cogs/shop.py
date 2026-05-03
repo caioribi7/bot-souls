@@ -378,7 +378,7 @@ class CustomRoleModal(discord.ui.Modal, title="✨ Criar Cargo Personalizado"):
             await interaction.followup.send("Use o modal dentro de um servidor.", ephemeral=True)
             return
 
-        member = interaction.member
+        member = interaction.user
         if member is None:
             try:
                 member = await guild.fetch_member(interaction.user.id)
@@ -549,7 +549,7 @@ class ShopPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            member = interaction.member
+            member = interaction.user
             if member is None:
                 try:
                     member = await guild.fetch_member(interaction.user.id)
@@ -730,7 +730,7 @@ class MarketView(discord.ui.View):
                 )
                 return
 
-            buyer_member = interaction.member
+            buyer_member = interaction.user
             if buyer_member is None:
                 try:
                     buyer_member = await guild.fetch_member(buyer_id)
