@@ -306,28 +306,53 @@ class SoulsBets(commands.Cog):
 
     # ── API helpers ───────────────────────────────────────────────────────────
 
-    async def _fetch_matches(
-        self,
-        api_key: str,
-        competition: str,
-        status: str = "SCHEDULED",
-    ) -> list[dict]:
+    async def _fetch_upcoming(self, api_key: str, competition: str) -> tuple[list[dict], str | None]:
+        """Retorna (partidas, erro_str). erro_str é None se OK."""
         if not self._session:
-            return []
+            return [], "sessão HTTP não iniciada"
+
+        date_from = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date_to = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y-%m-%d")
         url = f"{FOOTBALL_API_BASE}/competitions/{competition}/matches"
-        params: dict[str, Any] = {"status": status}
-        if status == "SCHEDULED":
-            date_from = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            date_to = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d")
-            params["dateFrom"] = date_from
-            params["dateTo"] = date_to
+        params = {"dateFrom": date_from, "dateTo": date_to}
 
         try:
             async with self._session.get(
                 url,
                 headers={"X-Auth-Token": api_key},
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=10),
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 403:
+                    return [], f"API retornou 403 — chave inválida ou competição **{competition}** não inclusa no plano"
+                if resp.status == 404:
+                    return [], f"Competição **{competition}** não encontrada na API"
+                if resp.status != 200:
+                    return [], f"API retornou HTTP {resp.status} para {competition}"
+                data = await resp.json()
+                matches = [
+                    m for m in data.get("matches", [])
+                    if m.get("status") in ("SCHEDULED", "TIMED")
+                ]
+                return matches, None
+        except asyncio.TimeoutError:
+            return [], f"Timeout ao conectar na API ({competition})"
+        except Exception as exc:
+            return [], f"Erro inesperado ({competition}): {exc}"
+
+    async def _fetch_finished(self, api_key: str, competition: str) -> list[dict]:
+        if not self._session:
+            return []
+        date_from = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
+        date_to = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        url = f"{FOOTBALL_API_BASE}/competitions/{competition}/matches"
+        params = {"status": "FINISHED", "dateFrom": date_from, "dateTo": date_to}
+        try:
+            async with self._session.get(
+                url,
+                headers={"X-Auth-Token": api_key},
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
                     return []
@@ -341,24 +366,35 @@ class SoulsBets(commands.Cog):
         guild_id: int,
         channel: discord.abc.Messageable,
         api_key: str,
-    ) -> None:
+    ) -> dict:
+        """Retorna resumo: {posted: int, skipped: int, errors: list[str]}"""
         db = self.bot.db
+        posted = 0
+        skipped = 0
+        errors: list[str] = []
+
         for comp_code in ("BSA", "CL"):
-            matches = await self._fetch_matches(api_key, comp_code)
-            for m in matches[:5]:  # máx 5 por competição por rodada
+            matches, err = await self._fetch_upcoming(api_key, comp_code)
+            if err:
+                errors.append(err)
+                continue
+
+            if not matches:
+                errors.append(f"Nenhuma partida encontrada nos próximos 14 dias para **{comp_code}**")
+                continue
+
+            for m in matches[:5]:
                 ext_id = m.get("id")
                 if not ext_id:
                     continue
                 if await db.fb_match_exists(guild_id, ext_id):
+                    skipped += 1
                     continue
 
                 home = m["homeTeam"]["name"]
                 away = m["awayTeam"]["name"]
                 utc_date = m.get("utcDate", "")
                 match_status = m.get("status", "SCHEDULED")
-
-                if match_status not in ("SCHEDULED", "TIMED"):
-                    continue
 
                 match_db_id = await db.create_fb_match(
                     guild_id=guild_id,
@@ -370,24 +406,25 @@ class SoulsBets(commands.Cog):
                 )
                 await db.update_fb_match(match_db_id, status=match_status)
 
-                embed = _match_embed(
-                    {
-                        "competition": comp_code,
-                        "home_team": home,
-                        "away_team": away,
-                        "match_date": utc_date,
-                        "status": match_status,
-                    }
-                )
+                embed = _match_embed({
+                    "competition": comp_code,
+                    "home_team": home,
+                    "away_team": away,
+                    "match_date": utc_date,
+                    "status": match_status,
+                })
                 view = MatchBetView(match_db_id, home, away)
                 try:
                     msg = await channel.send(embed=embed, view=view)  # type: ignore[union-attr]
                     await db.update_fb_match(match_db_id, message_id=msg.id)
                     self.bot.add_view(view, message_id=msg.id)
-                except discord.HTTPException:
-                    pass
+                    posted += 1
+                except discord.HTTPException as exc:
+                    errors.append(f"Erro ao postar partida: {exc}")
 
                 await asyncio.sleep(1)
+
+        return {"posted": posted, "skipped": skipped, "errors": errors}
 
     async def _check_and_resolve(self) -> None:
         db = self.bot.db
@@ -412,7 +449,7 @@ class SoulsBets(commands.Cog):
                     if not comp_matches:
                         continue
 
-                    finished = await self._fetch_matches(api_key, comp_code, "FINISHED")
+                    finished = await self._fetch_finished(api_key, comp_code)
                     finished_by_ext: dict[int, dict] = {f["id"]: f for f in finished}
 
                     for match in comp_matches:
@@ -574,15 +611,36 @@ class SoulsBets(commands.Cog):
             return
 
         await interaction.followup.send(
-            embed=discord.Embed(description="🔍 Buscando partidas... aguarde.", color=BOT_COLOR)
+            embed=discord.Embed(description="🔍 Buscando partidas nos próximos 14 dias...", color=BOT_COLOR)
         )
-        await self._post_upcoming_matches(interaction.guild_id, ch, cfg["api_key"])
-        await interaction.edit_original_response(
-            embed=discord.Embed(
-                description="✅ Partidas publicadas! Verifique o canal configurado.",
-                color=SUCCESS_COLOR,
+
+        result = await self._post_upcoming_matches(interaction.guild_id, ch, cfg["api_key"])
+
+        posted = result["posted"]
+        skipped = result["skipped"]
+        errors = result["errors"]
+
+        if posted > 0:
+            color = SUCCESS_COLOR
+            desc = f"✅ **{posted}** partida(s) publicadas em {ch.mention}."  # type: ignore[union-attr]
+        elif skipped > 0 and not errors:
+            color = WARNING_COLOR
+            desc = f"⚠️ Nenhuma partida nova — **{skipped}** já estavam publicadas."
+        else:
+            color = ERROR_COLOR
+            desc = "❌ Nenhuma partida foi publicada."
+
+        if skipped > 0 and posted > 0:
+            desc += f"\n⏭️ {skipped} já publicada(s) anteriormente (ignoradas)."
+
+        embed = discord.Embed(description=desc, color=color)
+        if errors:
+            embed.add_field(
+                name="⚠️ Avisos / Erros",
+                value="\n".join(f"• {e}" for e in errors),
+                inline=False,
             )
-        )
+        await interaction.edit_original_response(embed=embed)
 
     # ── Public commands ───────────────────────────────────────────────────────
 
