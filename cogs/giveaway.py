@@ -205,11 +205,11 @@ class Giveaway(commands.Cog):
         else:
             await channel.send("❌ Nenhum participante no sorteio. Sem ganhadores.")
 
-    # ── /msorteio (staff — vencedor garantido na lista final) ────────────────
+    # ── /msorteio (vencedor garantido na lista final; uso livre no servidor) ─
 
     @app_commands.command(
         name="msorteio",
-        description="[Staff] Sorteio que inclui sempre o membro escolhido entre os ganhadores.",
+        description="Sorteio que inclui sempre o membro escolhido entre os ganhadores.",
     )
     @app_commands.describe(
         premio="Prêmio (mensagem pública igual ao sorteio normal)",
@@ -218,7 +218,6 @@ class Giveaway(commands.Cog):
         ganhadores="Total de ganhadores (≥1)",
         canal="Canal do sorteio (padrão: atual)",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def msorteio(
         self,
         interaction: discord.Interaction,
