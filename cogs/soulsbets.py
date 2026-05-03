@@ -489,17 +489,13 @@ class SoulsBets(commands.Cog):
     soulsbets_group = app_commands.Group(
         name="soulsbets",
         description="Apostas em futebol — Brasileirão e Champions League",
-        default_permissions=discord.Permissions(administrator=True),
     )
 
-    config_group = app_commands.Group(
-        name="config",
-        description="Configurações do SoulsBets",
-        parent=soulsbets_group,
-    )
+    # ── Admin commands ────────────────────────────────────────────────────────
 
-    @config_group.command(name="canal", description="Define o canal onde as partidas são publicadas")
+    @soulsbets_group.command(name="canal", description="[Admin] Define o canal onde as partidas são publicadas")
     @app_commands.describe(canal="Canal de texto para publicar os jogos")
+    @app_commands.checks.has_permissions(administrator=True)
     async def config_canal(self, interaction: discord.Interaction, canal: discord.TextChannel):
         await interaction.response.defer(ephemeral=True)
         await self.bot.db.set_soulsbets_config(interaction.guild_id, channel_id=canal.id)
@@ -510,8 +506,9 @@ class SoulsBets(commands.Cog):
             )
         )
 
-    @config_group.command(name="api", description="Define a chave da API football-data.org")
+    @soulsbets_group.command(name="api", description="[Admin] Define a chave da API football-data.org")
     @app_commands.describe(chave="Chave da API (registre em football-data.org)")
+    @app_commands.checks.has_permissions(administrator=True)
     async def config_api(self, interaction: discord.Interaction, chave: str):
         await interaction.response.defer(ephemeral=True)
         await self.bot.db.set_soulsbets_config(interaction.guild_id, api_key=chave)
@@ -522,7 +519,8 @@ class SoulsBets(commands.Cog):
             )
         )
 
-    @config_group.command(name="status", description="Mostra a configuração atual do SoulsBets")
+    @soulsbets_group.command(name="info", description="[Admin] Mostra a configuração atual do SoulsBets")
+    @app_commands.checks.has_permissions(administrator=True)
     async def config_status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         cfg = await self.bot.db.get_soulsbets_config(interaction.guild_id)
@@ -538,15 +536,13 @@ class SoulsBets(commands.Cog):
         embed.add_field(name="Ativo", value="✅ Sim" if cfg["enabled"] else "❌ Não", inline=True)
         embed.add_field(
             name="Como obter API key",
-            value="Registre-se em [football-data.org](https://www.football-data.org/client/register) — plano gratuito inclui Brasileirão e Champions League.",
+            value="Registre-se em football-data.org — plano gratuito inclui Brasileirão e Champions League.",
             inline=False,
         )
         await interaction.followup.send(embed=embed)
 
-    @soulsbets_group.command(
-        name="publicar",
-        description="Publica manualmente as próximas partidas no canal configurado",
-    )
+    @soulsbets_group.command(name="publicar", description="[Admin] Publica manualmente as próximas partidas")
+    @app_commands.checks.has_permissions(administrator=True)
     async def publicar(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         cfg = await self.bot.db.get_soulsbets_config(interaction.guild_id)
@@ -554,7 +550,7 @@ class SoulsBets(commands.Cog):
         if not cfg["channel_id"]:
             await interaction.followup.send(
                 embed=discord.Embed(
-                    description="Configure o canal primeiro: `/soulsbets config canal`.",
+                    description="Configure o canal primeiro: `/soulsbets canal`.",
                     color=ERROR_COLOR,
                 )
             )
@@ -562,7 +558,7 @@ class SoulsBets(commands.Cog):
         if not cfg["api_key"]:
             await interaction.followup.send(
                 embed=discord.Embed(
-                    description="Configure a API key primeiro: `/soulsbets config api`.",
+                    description="Configure a API key primeiro: `/soulsbets api`.",
                     color=ERROR_COLOR,
                 )
             )
@@ -578,9 +574,7 @@ class SoulsBets(commands.Cog):
             return
 
         await interaction.followup.send(
-            embed=discord.Embed(
-                description="🔍 Buscando partidas... aguarde.", color=BOT_COLOR
-            )
+            embed=discord.Embed(description="🔍 Buscando partidas... aguarde.", color=BOT_COLOR)
         )
         await self._post_upcoming_matches(interaction.guild_id, ch, cfg["api_key"])
         await interaction.edit_original_response(
@@ -590,11 +584,9 @@ class SoulsBets(commands.Cog):
             )
         )
 
-    @soulsbets_group.command(
-        name="minhasapostas",
-        description="Veja suas últimas apostas",
-        default_permissions=None,  # qualquer membro pode usar
-    )
+    # ── Public commands ───────────────────────────────────────────────────────
+
+    @soulsbets_group.command(name="minhasapostas", description="Veja suas últimas apostas")
     async def minhasapostas(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         bets = await self.bot.db.get_user_fb_bets(interaction.user.id, interaction.guild_id)
@@ -625,11 +617,7 @@ class SoulsBets(commands.Cog):
         embed.description = "\n".join(lines[:10])
         await interaction.followup.send(embed=embed)
 
-    @soulsbets_group.command(
-        name="partidas",
-        description="Lista partidas abertas para apostas",
-        default_permissions=None,
-    )
+    @soulsbets_group.command(name="partidas", description="Lista partidas abertas para apostas")
     async def partidas(self, interaction: discord.Interaction):
         await interaction.response.defer()
         active = await self.bot.db.get_active_fb_matches(interaction.guild_id)
@@ -643,10 +631,7 @@ class SoulsBets(commands.Cog):
             )
             return
 
-        embed = discord.Embed(
-            title="⚽ Partidas Disponíveis para Apostas",
-            color=BOT_COLOR,
-        )
+        embed = discord.Embed(title="⚽ Partidas Disponíveis para Apostas", color=BOT_COLOR)
         for m in active[:10]:
             comp = COMPETITIONS.get(m["competition"], m["competition"])
             try:
@@ -656,7 +641,7 @@ class SoulsBets(commands.Cog):
                 date_str = m["match_date"]
             status = "🟢 Aberta" if m["status"] in ("SCHEDULED", "TIMED") else "🔴 Fechada"
             embed.add_field(
-                name=f"{comp}",
+                name=comp,
                 value=f"**{m['home_team']}** vs **{m['away_team']}**\n📅 {date_str} • {status}",
                 inline=False,
             )
@@ -665,6 +650,22 @@ class SoulsBets(commands.Cog):
         if cfg["channel_id"]:
             embed.set_footer(text=f"Aposte no canal <#{cfg['channel_id']}>")
         await interaction.followup.send(embed=embed)
+
+    # ── Error handler ─────────────────────────────────────────────────────────
+
+    async def cog_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description="❌ Você precisa de permissão de **administrador** para usar este comando.",
+                    color=ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+        else:
+            raise error
 
 
 async def setup(bot: commands.Bot):
