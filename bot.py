@@ -40,6 +40,7 @@ class CommunityBot(commands.Bot):
             "cogs.clans",
             "cogs.admin_panel",
             "cogs.guide",
+            "cogs.soulsbets",
         ]
         for cog in cogs:
             try:

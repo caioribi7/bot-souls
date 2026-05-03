@@ -207,6 +207,88 @@ class Database:
                     message_id        INTEGER DEFAULT 0,
                     market_message_id INTEGER DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS study_sessions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id         INTEGER,
+                    guild_id        INTEGER,
+                    subject         TEXT,
+                    duration_minutes INTEGER,
+                    xp_earned       INTEGER,
+                    start_time      TEXT,
+                    end_time        TEXT,
+                    focus_level     TEXT DEFAULT 'normal'
+                );
+
+                CREATE TABLE IF NOT EXISTS study_goals (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id         INTEGER,
+                    guild_id        INTEGER,
+                    goal_type       TEXT,
+                    target_minutes  INTEGER,
+                    current_minutes INTEGER DEFAULT 0,
+                    subject         TEXT,
+                    deadline        TEXT,
+                    completed       INTEGER DEFAULT 0,
+                    created_at      TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS user_study_stats (
+                    user_id         INTEGER,
+                    guild_id        INTEGER,
+                    total_minutes   INTEGER DEFAULT 0,
+                    total_sessions  INTEGER DEFAULT 0,
+                    current_streak  INTEGER DEFAULT 0,
+                    max_streak      INTEGER DEFAULT 0,
+                    last_study_date TEXT,
+                    total_xp        INTEGER DEFAULT 0,
+                    favorite_subject TEXT,
+                    PRIMARY KEY (user_id, guild_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS study_streaks (
+                    user_id         INTEGER,
+                    guild_id        INTEGER,
+                    date            TEXT,
+                    minutes_studied INTEGER,
+                    PRIMARY KEY (user_id, guild_id, date)
+                );
+
+                CREATE TABLE IF NOT EXISTS soulsbets_config (
+                    guild_id   INTEGER PRIMARY KEY,
+                    channel_id INTEGER DEFAULT 0,
+                    api_key    TEXT    DEFAULT '',
+                    enabled    INTEGER DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS fb_matches (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id     INTEGER,
+                    external_id  INTEGER,
+                    competition  TEXT,
+                    home_team    TEXT,
+                    away_team    TEXT,
+                    match_date   TEXT,
+                    status       TEXT    DEFAULT 'SCHEDULED',
+                    home_score   INTEGER,
+                    away_score   INTEGER,
+                    winner       TEXT,
+                    message_id   INTEGER DEFAULT 0,
+                    resolved     INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS fb_bets (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id    INTEGER,
+                    match_id    INTEGER,
+                    user_id     INTEGER,
+                    prediction  TEXT,
+                    amount      INTEGER,
+                    resolved    INTEGER DEFAULT 0,
+                    won         INTEGER,
+                    payout      INTEGER DEFAULT 0,
+                    placed_at   TEXT
+                );
             """)
             await db.commit()
 
@@ -1131,3 +1213,272 @@ class Database:
                 (giveaway_id, user_id),
             ) as cur:
                 return await cur.fetchone() is not None
+
+    # ── Study System ─────────────────────────────────────────────────────────
+
+    async def create_study_session(
+        self,
+        user_id: int,
+        guild_id: int,
+        subject: str,
+        duration_minutes: int,
+        xp_earned: int,
+    ) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO study_sessions (user_id, guild_id, subject, duration_minutes, xp_earned, start_time, end_time)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                (user_id, guild_id, subject, duration_minutes, xp_earned,
+                 datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def get_study_stats(self, user_id: int, guild_id: int) -> dict:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM user_study_stats WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id),
+            ) as cur:
+                row = await cur.fetchone()
+            if row:
+                return dict(row)
+            await db.execute(
+                "INSERT INTO user_study_stats (user_id, guild_id) VALUES (?,?)",
+                (user_id, guild_id),
+            )
+            await db.commit()
+            return {
+                "user_id": user_id,
+                "guild_id": guild_id,
+                "total_minutes": 0,
+                "total_sessions": 0,
+                "current_streak": 0,
+                "max_streak": 0,
+                "last_study_date": None,
+                "total_xp": 0,
+                "favorite_subject": None,
+            }
+
+    async def update_study_stats(self, user_id: int, guild_id: int, **fields):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO user_study_stats (user_id, guild_id) VALUES (?,?)",
+                (user_id, guild_id),
+            )
+            for key, val in fields.items():
+                await db.execute(
+                    f"UPDATE user_study_stats SET {key}=? WHERE user_id=? AND guild_id=?",
+                    (val, user_id, guild_id),
+                )
+            await db.commit()
+
+    async def create_study_goal(
+        self,
+        user_id: int,
+        guild_id: int,
+        goal_type: str,
+        target_minutes: int,
+        subject: str,
+        deadline: str,
+    ) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO study_goals (user_id, guild_id, goal_type, target_minutes, subject, deadline, created_at)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                (user_id, guild_id, goal_type, target_minutes, subject, deadline, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def get_active_goals(self, user_id: int, guild_id: int) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM study_goals WHERE user_id=? AND guild_id=? AND completed=0 ORDER BY deadline",
+                (user_id, guild_id),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def complete_goal(self, goal_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE study_goals SET completed=1 WHERE id=?", (goal_id,))
+            await db.commit()
+
+    async def add_study_streak(self, user_id: int, guild_id: int, date: str, minutes: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """
+                INSERT INTO study_streaks (user_id, guild_id, date, minutes_studied)
+                VALUES (?,?,?,?)
+                ON CONFLICT(user_id, guild_id, date) DO UPDATE SET minutes_studied=minutes_studied+?
+                """,
+                (user_id, guild_id, date, minutes, minutes),
+            )
+            await db.commit()
+
+    async def get_study_leaderboard(self, guild_id: int, limit: int = 10) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT user_id, total_minutes, current_streak, total_xp FROM user_study_stats
+                WHERE guild_id=? ORDER BY total_xp DESC LIMIT ?
+                """,
+                (guild_id, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    # ── SoulsBets ────────────────────────────────────────────────────────────
+
+    async def get_soulsbets_config(self, guild_id: int) -> dict:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "INSERT OR IGNORE INTO soulsbets_config (guild_id) VALUES (?)", (guild_id,)
+            )
+            await db.commit()
+            async with db.execute(
+                "SELECT * FROM soulsbets_config WHERE guild_id=?", (guild_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row)
+
+    async def set_soulsbets_config(self, guild_id: int, **fields):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO soulsbets_config (guild_id) VALUES (?)", (guild_id,)
+            )
+            for key, val in fields.items():
+                await db.execute(
+                    f"UPDATE soulsbets_config SET {key}=? WHERE guild_id=?", (val, guild_id)
+                )
+            await db.commit()
+
+    async def create_fb_match(
+        self,
+        guild_id: int,
+        external_id: int,
+        competition: str,
+        home_team: str,
+        away_team: str,
+        match_date: str,
+    ) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO fb_matches
+                    (guild_id, external_id, competition, home_team, away_team, match_date)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (guild_id, external_id, competition, home_team, away_team, match_date),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def get_fb_match(self, match_id: int) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM fb_matches WHERE id=?", (match_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def fb_match_exists(self, guild_id: int, external_id: int) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            async with db.execute(
+                "SELECT 1 FROM fb_matches WHERE guild_id=? AND external_id=?",
+                (guild_id, external_id),
+            ) as cur:
+                return await cur.fetchone() is not None
+
+    async def get_active_fb_matches(self, guild_id: int) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM fb_matches WHERE guild_id=? AND resolved=0 ORDER BY match_date",
+                (guild_id,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def get_all_unresolved_fb_matches(self) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM fb_matches WHERE resolved=0 ORDER BY match_date"
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def update_fb_match(self, match_id: int, **fields):
+        async with aiosqlite.connect(self.path) as db:
+            for key, val in fields.items():
+                await db.execute(
+                    f"UPDATE fb_matches SET {key}=? WHERE id=?", (val, match_id)
+                )
+            await db.commit()
+
+    async def create_fb_bet(
+        self,
+        guild_id: int,
+        match_id: int,
+        user_id: int,
+        prediction: str,
+        amount: int,
+    ) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO fb_bets (guild_id, match_id, user_id, prediction, amount, placed_at)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (guild_id, match_id, user_id, prediction, amount, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def get_fb_bet(self, match_id: int, user_id: int, guild_id: int) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM fb_bets WHERE match_id=? AND user_id=? AND guild_id=?",
+                (match_id, user_id, guild_id),
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def get_fb_bets_for_match(self, match_id: int) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM fb_bets WHERE match_id=?", (match_id,)
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def resolve_fb_bet(self, bet_id: int, won: bool, payout: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE fb_bets SET resolved=1, won=?, payout=? WHERE id=?",
+                (1 if won else 0, payout, bet_id),
+            )
+            await db.commit()
+
+    async def get_user_fb_bets(self, user_id: int, guild_id: int, limit: int = 10) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT b.*, m.home_team, m.away_team, m.competition, m.match_date
+                FROM fb_bets b
+                JOIN fb_matches m ON m.id = b.match_id
+                WHERE b.user_id=? AND b.guild_id=?
+                ORDER BY b.placed_at DESC LIMIT ?
+                """,
+                (user_id, guild_id, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]

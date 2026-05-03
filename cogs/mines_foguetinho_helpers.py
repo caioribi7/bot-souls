@@ -49,26 +49,29 @@ def mines_embed(game: dict) -> discord.Embed:
         rows_txt.append(" ".join(cells))
 
     desc = "```\n" + "\n".join(rows_txt) + "\n```\n"
-    desc += f"Seguras encontradas: **{len(revealed)}** / **{MINES_TOTAL - MINES_BOMBS}** • Bombas ocultas: **{MINES_BOMBS}**"
+    desc += (
+        f"Seguras encontradas: **{len(revealed)}** / **{MINES_TOTAL - MINES_BOMBS}**"
+        f" • Bombas ocultas: **{MINES_BOMBS}**"
+    )
 
     col = BOT_COLOR if not ended else (ERROR_COLOR if boom is not None else SUCCESS_COLOR)
 
-    embed = discord.Embed(
-        title="💣 Bombinha",
-        description=desc,
-        color=col,
-    )
+    embed = discord.Embed(title="💣 Bombinha", description=desc, color=col)
     embed.add_field(name="Aposta", value=f"{SWEET_COIN_EMOJI} **{bet:,}**", inline=True)
     embed.add_field(name="Multiplicador", value=f"**×{mult:.2f}**", inline=True)
     if not ended:
+        n_revealed = len(revealed)
+        if n_revealed > 0:
+            potential = int(round(bet * mult))
+            embed.add_field(
+                name="Sacar agora",
+                value=f"{SWEET_COIN_EMOJI} **{potential:,}** (lucro **+{potential - bet:,}**)",
+                inline=True,
+            )
         embed.set_footer(
-            text="Clique num número para abrir. Sacar paga aposta × multiplicador atual. 3 bombas no tabuleiro."
+            text="Clique num número para abrir. Sacar paga aposta × multiplicador. 3 bombas no tabuleiro."
         )
     return embed
-
-
-async def _noop_ix(interaction: discord.Interaction) -> None:
-    await interaction.response.defer()
 
 
 def mines_apply_safe_mult(game: dict) -> None:
@@ -83,12 +86,15 @@ def mines_apply_safe_mult(game: dict) -> None:
 class BombinhaSacarBtn(discord.ui.Button):
     def __init__(self, *, disabled: bool, user_id: int):
         super().__init__(
-            label="💰 Sacar", style=discord.ButtonStyle.success,
-            row=4, disabled=disabled, custom_id=f"ms_{user_id}",
+            label="💰 Sacar",
+            style=discord.ButtonStyle.success,
+            row=4,
+            disabled=disabled,
+            custom_id=f"ms_{user_id}",
         )
 
     async def callback(self, interaction: discord.Interaction):
-        v = interaction.view
+        v: MinesBombinhaView | None = self.view  # type: ignore[assignment]
         if not isinstance(v, MinesBombinhaView):
             await interaction.response.defer()
             return
@@ -99,13 +105,15 @@ class BombinhaCellBtn(discord.ui.Button):
     def __init__(self, idx: int, user_id: int):
         row = idx // MINES_COLS
         super().__init__(
-            label=str(idx + 1), style=discord.ButtonStyle.secondary,
-            row=row, custom_id=f"mc_{user_id}_{idx}",
+            label=str(idx + 1),
+            style=discord.ButtonStyle.secondary,
+            row=row,
+            custom_id=f"mc_{user_id}_{idx}",
         )
         self.idx = idx
 
     async def callback(self, interaction: discord.Interaction):
-        v = interaction.view
+        v: MinesBombinhaView | None = self.view  # type: ignore[assignment]
         if not isinstance(v, MinesBombinhaView):
             await interaction.response.defer()
             return
@@ -126,44 +134,19 @@ class MinesBombinhaView(discord.ui.View):
     def _rebuild_buttons(self) -> None:
         self.clear_items()
         g = self.game
-        boom = g.get("boom_idx")
         rv = g["revealed_safe"]
-        bombs = g["bombs"]
-        ended = boom is not None or g.get("finished")
         uid = self.user_id
-
-        if ended:
-            for i in range(MINES_TOTAL):
-                row = i // MINES_COLS
-                if i in bombs:
-                    lab = "💥" if i == boom else "💣"
-                    btn = discord.ui.Button(
-                        style=discord.ButtonStyle.danger,
-                        label=lab, row=row, disabled=True,
-                        custom_id=f"mce_{uid}_{i}",
-                    )
-                elif i in rv:
-                    btn = discord.ui.Button(
-                        style=discord.ButtonStyle.success, label="✓",
-                        row=row, disabled=True, custom_id=f"mce_{uid}_{i}",
-                    )
-                else:
-                    btn = discord.ui.Button(
-                        style=discord.ButtonStyle.secondary, label="·",
-                        row=row, disabled=True, custom_id=f"mce_{uid}_{i}",
-                    )
-                btn.callback = _noop_ix  # type: ignore[method-assign]
-                self.add_item(btn)
-            return
 
         for i in range(MINES_TOTAL):
             row = i // MINES_COLS
             if i in rv:
-                btn = discord.ui.Button(
-                    style=discord.ButtonStyle.success, label="✓",
-                    row=row, disabled=True, custom_id=f"mcs_{uid}_{i}",
+                btn: discord.ui.Button = discord.ui.Button(
+                    style=discord.ButtonStyle.success,
+                    label="✓",
+                    row=row,
+                    disabled=True,
+                    custom_id=f"mcs_{uid}_{i}",
                 )
-                btn.callback = _noop_ix  # type: ignore[method-assign]
             else:
                 btn = BombinhaCellBtn(i, uid)
             self.add_item(btn)
@@ -172,7 +155,9 @@ class MinesBombinhaView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Esta Bombinha não é sua.", ephemeral=True)
+            await interaction.response.send_message(
+                "Esta Bombinha não é sua.", ephemeral=True
+            )
             return False
         return True
 
@@ -181,30 +166,29 @@ class MinesBombinhaView(discord.ui.View):
         if not popped:
             return
 
-        cid = popped.get("channel_id")
-        mid = popped.get("message_id")
-
-        bot = self.cog.bot
-
         embed = discord.Embed(
             title="💣 Bombinha — Tempo esgotado",
-            description=f"Você perdeu a aposta ({SWEET_COIN_EMOJI} **{popped['bet']:,}**).",
+            description=f"Você demorou demais. Aposta perdida ({SWEET_COIN_EMOJI} **{popped['bet']:,}**).",
             color=ERROR_COLOR,
         )
 
-        if cid and mid:
-            ch = bot.get_channel(cid)
+        cid = popped.get("channel_id")
+        mid = popped.get("message_id")
+        if not (cid and mid):
+            return
+
+        bot = self.cog.bot
+        try:
+            ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
             if ch and hasattr(ch, "fetch_message"):
-                try:
-                    msg = await ch.fetch_message(mid)
-                    await msg.edit(embed=embed, view=None)
-                    return
-                except discord.HTTPException:
-                    pass
+                msg = await ch.fetch_message(mid)
+                await msg.edit(embed=embed, view=None)
+        except Exception:
+            pass
 
     async def on_pick(self, interaction: discord.Interaction, idx: int) -> None:
         g = self.game
-        if g.get("boom_idx") or g.get("finished"):
+        if g.get("boom_idx") is not None or g.get("finished"):
             await interaction.response.defer()
             return
         if idx in g["revealed_safe"]:
@@ -222,7 +206,14 @@ class MinesBombinhaView(discord.ui.View):
             embed.description = (embed.description or "") + (
                 f"\n\n💥 Você pisou na bomba! **-{SWEET_COIN_EMOJI} {g['bet']:,}**"
             )
-            await interaction.response.edit_message(embed=embed, view=None)
+            try:
+                await interaction.response.edit_message(embed=embed, view=None)
+            except discord.HTTPException:
+                if interaction.message:
+                    try:
+                        await interaction.message.edit(embed=embed, view=None)
+                    except discord.HTTPException:
+                        pass
             return
 
         g["revealed_safe"].add(idx)
@@ -230,40 +221,52 @@ class MinesBombinhaView(discord.ui.View):
 
         max_safe = MINES_TOTAL - g["bomb_count"]
         if len(g["revealed_safe"]) >= max_safe:
-            payout = max(0, int(round(g["bet"] * round(g["mult"], 8))))
-            if payout < g["bet"]:
-                payout = g["bet"]
-
+            payout = max(g["bet"], int(round(g["bet"] * g["mult"])))
             await db.add_coins(self.user_id, self.guild_id, payout)
             g["finished"] = "clean"
             self.stop()
             self.cog._mines_sessions.pop(self.user_id, None)
             profit = payout - g["bet"]
             emb = mines_embed(g)
-            emb.title = "💣 Bombinha — Tabuleiro limpo!"
+            emb.title = "💣 Bombinha — Tabuleiro limpo! 🎉"
             emb.description = (emb.description or "") + (
-                f"\n\n🎉 **{SWEET_COIN_EMOJI} {payout:,}** ganhos ( lucro **+{profit:,}** )"
+                f"\n\n🎉 **{SWEET_COIN_EMOJI} {payout:,}** ganhos (lucro **+{profit:,}**)"
             )
-            await interaction.response.edit_message(embed=emb, view=None)
+            try:
+                await interaction.response.edit_message(embed=emb, view=None)
+            except discord.HTTPException:
+                if interaction.message:
+                    try:
+                        await interaction.message.edit(embed=emb, view=None)
+                    except discord.HTTPException:
+                        pass
             return
 
         self._rebuild_buttons()
-        await interaction.response.edit_message(embed=mines_embed(g), view=self)
+        try:
+            await interaction.response.edit_message(embed=mines_embed(g), view=self)
+        except discord.HTTPException:
+            if interaction.message:
+                try:
+                    await interaction.message.edit(embed=mines_embed(g), view=self)
+                except discord.HTTPException:
+                    pass
 
     async def cash_out(self, interaction: discord.Interaction) -> None:
         g = self.game
-        if g.get("boom_idx") or g.get("finished"):
-            await interaction.response.send_message("Rodada já encerrou.", ephemeral=True)
+        if g.get("boom_idx") is not None or g.get("finished"):
+            await interaction.response.send_message(
+                "Rodada já encerrou.", ephemeral=True
+            )
             return
         if len(g["revealed_safe"]) < 1:
-            await interaction.response.send_message("Abra ao menos uma casa segura antes de sacar.", ephemeral=True)
+            await interaction.response.send_message(
+                "Abra ao menos uma casa segura antes de sacar.", ephemeral=True
+            )
             return
 
         db = self.cog.bot.db
-        payout = max(1, int(round(g["bet"] * round(g["mult"], 8))))
-        if payout < g["bet"]:
-            payout = g["bet"]
-
+        payout = max(g["bet"], int(round(g["bet"] * g["mult"])))
         await db.add_coins(self.user_id, self.guild_id, payout)
         g["finished"] = "cashout"
         profit = payout - g["bet"]
@@ -273,11 +276,14 @@ class MinesBombinhaView(discord.ui.View):
         emb = mines_embed(g)
         emb.title = "💣 Bombinha — Sacou!"
         emb.description = (emb.description or "") + (
-            f"\n\n💰 Você sacou **{SWEET_COIN_EMOJI} {payout:,}** ( lucro líquido **+{profit:,}** )."
+            f"\n\n💰 Você sacou **{SWEET_COIN_EMOJI} {payout:,}** (lucro **+{profit:,}**)."
         )
         emb.color = SUCCESS_COLOR
         try:
             await interaction.response.edit_message(embed=emb, view=None)
         except discord.HTTPException:
             if interaction.message:
-                await interaction.message.edit(embed=emb, view=None)
+                try:
+                    await interaction.message.edit(embed=emb, view=None)
+                except discord.HTTPException:
+                    pass
