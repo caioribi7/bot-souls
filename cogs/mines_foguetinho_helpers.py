@@ -81,8 +81,11 @@ def mines_apply_safe_mult(game: dict) -> None:
 
 
 class BombinhaSacarBtn(discord.ui.Button):
-    def __init__(self, *, disabled: bool):
-        super().__init__(label="💰 Sacar", style=discord.ButtonStyle.success, row=4, disabled=disabled)
+    def __init__(self, *, disabled: bool, user_id: int):
+        super().__init__(
+            label="💰 Sacar", style=discord.ButtonStyle.success,
+            row=4, disabled=disabled, custom_id=f"ms_{user_id}",
+        )
 
     async def callback(self, interaction: discord.Interaction):
         v = interaction.view
@@ -93,10 +96,12 @@ class BombinhaSacarBtn(discord.ui.Button):
 
 
 class BombinhaCellBtn(discord.ui.Button):
-    def __init__(self, idx: int):
+    def __init__(self, idx: int, user_id: int):
         row = idx // MINES_COLS
-        label = str(idx + 1)
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=row)
+        super().__init__(
+            label=str(idx + 1), style=discord.ButtonStyle.secondary,
+            row=row, custom_id=f"mc_{user_id}_{idx}",
+        )
         self.idx = idx
 
     async def callback(self, interaction: discord.Interaction):
@@ -125,6 +130,7 @@ class MinesBombinhaView(discord.ui.View):
         rv = g["revealed_safe"]
         bombs = g["bombs"]
         ended = boom is not None or g.get("finished")
+        uid = self.user_id
 
         if ended:
             for i in range(MINES_TOTAL):
@@ -133,17 +139,18 @@ class MinesBombinhaView(discord.ui.View):
                     lab = "💥" if i == boom else "💣"
                     btn = discord.ui.Button(
                         style=discord.ButtonStyle.danger,
-                        label=lab,
-                        row=row,
-                        disabled=True,
+                        label=lab, row=row, disabled=True,
+                        custom_id=f"mce_{uid}_{i}",
                     )
                 elif i in rv:
                     btn = discord.ui.Button(
-                        style=discord.ButtonStyle.success, label="✓", row=row, disabled=True
+                        style=discord.ButtonStyle.success, label="✓",
+                        row=row, disabled=True, custom_id=f"mce_{uid}_{i}",
                     )
                 else:
                     btn = discord.ui.Button(
-                        style=discord.ButtonStyle.secondary, label="·", row=row, disabled=True
+                        style=discord.ButtonStyle.secondary, label="·",
+                        row=row, disabled=True, custom_id=f"mce_{uid}_{i}",
                     )
                 btn.callback = _noop_ix  # type: ignore[method-assign]
                 self.add_item(btn)
@@ -153,14 +160,15 @@ class MinesBombinhaView(discord.ui.View):
             row = i // MINES_COLS
             if i in rv:
                 btn = discord.ui.Button(
-                    style=discord.ButtonStyle.success, label="✓", row=row, disabled=True
+                    style=discord.ButtonStyle.success, label="✓",
+                    row=row, disabled=True, custom_id=f"mcs_{uid}_{i}",
                 )
                 btn.callback = _noop_ix  # type: ignore[method-assign]
             else:
-                btn = BombinhaCellBtn(i)
+                btn = BombinhaCellBtn(i, uid)
             self.add_item(btn)
 
-        self.add_item(BombinhaSacarBtn(disabled=len(rv) < 1))
+        self.add_item(BombinhaSacarBtn(disabled=len(rv) < 1, user_id=uid))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:

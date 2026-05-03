@@ -100,34 +100,252 @@ async def _build_market_embed(
     return embed
 
 
-# ── Confirm View ─────────────────────────────────────────────────────────────
+# ── Confirm Views ─────────────────────────────────────────────────────────────
 
 class BuyConfirmView(discord.ui.View):
-    """Ephemeral yes/no confirmation — uses only the button's own interaction."""
+    """Shop item purchase confirmation. All logic lives inside the confirm callback."""
 
-    def __init__(self, label: str):
+    def __init__(self, bot: commands.Bot, member: discord.Member, guild: discord.Guild, item: dict):
         super().__init__(timeout=60)
-        self.confirmed: bool = False
+        self.bot = bot
+        self.member = member
+        self.guild = guild
+        self.item = item
+        self._done = False
 
-    @discord.ui.button(label="✅ Confirmar", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.confirmed = True
-        for child in self.children:
-            child.disabled = True  # type: ignore[union-attr]
-        await interaction.response.edit_message(
-            content="⏳ Processando sua compra…", embed=None, view=self
+        uid, iid = member.id, item["id"]
+        btn_ok = discord.ui.Button(
+            label="✅ Confirmar", style=discord.ButtonStyle.success,
+            custom_id=f"bcf:{uid}:{iid}",
         )
-        self.stop()
+        btn_ok.callback = self._do_confirm
+        self.add_item(btn_ok)
 
-    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.confirmed = False
-        for child in self.children:
-            child.disabled = True  # type: ignore[union-attr]
-        await interaction.response.edit_message(
-            content="🚫 Compra cancelada.", embed=None, view=self
+        btn_no = discord.ui.Button(
+            label="❌ Cancelar", style=discord.ButtonStyle.danger,
+            custom_id=f"bcc:{uid}:{iid}",
         )
+        btn_no.callback = self._do_cancel
+        self.add_item(btn_no)
+
+    async def _do_confirm(self, interaction: discord.Interaction):
+        if self._done:
+            await interaction.response.defer()
+            return
+        self._done = True
         self.stop()
+        for c in self.children:
+            c.disabled = True  # type: ignore[union-attr]
+        await interaction.response.edit_message(content="⏳ Processando…", embed=None, view=self)
+
+        db = self.bot.db
+        item = self.item
+        member = self.member
+        guild = self.guild
+        price = item["price"]
+
+        try:
+            ok = await db.buy_item(member.id, guild.id, item["id"], price)
+            if not ok:
+                await interaction.edit_original_response(
+                    content="❌ Compra falhou (saldo insuficiente ou item já comprado).",
+                    embed=None, view=None,
+                )
+                return
+
+            role = guild.get_role(item["role_id"])
+            if role:
+                try:
+                    await member.add_roles(role, reason=f"Compra na loja: {item['name']}")
+                except discord.Forbidden:
+                    await db.remove_shop_purchase(member.id, guild.id, item["id"])
+                    await db.add_coins(member.id, guild.id, price)
+                    await interaction.edit_original_response(
+                        content="❌ Sem permissão para conceder o cargo. Moedas devolvidas.",
+                        embed=None, view=None,
+                    )
+                    return
+
+            bal_now = (await db.get_user(member.id, guild.id))["balance"]
+            emoji_str = item.get("emoji") or "🎭"
+            role_mention = role.mention if role else ""
+            success_embed = discord.Embed(
+                title="✅ Compra realizada!",
+                description=(
+                    f"Você adquiriu {emoji_str} **{item['name']}**"
+                    + (f" e recebeu {role_mention}!" if role_mention else "!")
+                    + f"\nSaldo restante: `{bal_now:,}` {SWEET_COIN}"
+                ),
+                color=SUCCESS_COLOR,
+            )
+            await interaction.edit_original_response(content=None, embed=success_embed, view=None)
+
+            cog = self.bot.cogs.get("Shop")
+            if cog:
+                await cog._refresh_shop_panel(guild)  # type: ignore[union-attr]
+
+        except Exception:
+            log.exception("Erro na compra da loja")
+            try:
+                await interaction.edit_original_response(
+                    content="❌ Erro ao processar. Tente de novo.", embed=None, view=None,
+                )
+            except Exception:
+                pass
+
+    async def _do_cancel(self, interaction: discord.Interaction):
+        if self._done:
+            await interaction.response.defer()
+            return
+        self._done = True
+        self.stop()
+        for c in self.children:
+            c.disabled = True  # type: ignore[union-attr]
+        await interaction.response.edit_message(content="🚫 Compra cancelada.", embed=None, view=None)
+
+
+class MarketBuyConfirmView(discord.ui.View):
+    """Market listing purchase confirmation. All logic lives inside the confirm callback."""
+
+    def __init__(
+        self, bot: commands.Bot, buyer_member: discord.Member,
+        guild: discord.Guild, listing: dict,
+    ):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.buyer_member = buyer_member
+        self.guild = guild
+        self.listing = listing
+        self._done = False
+
+        uid, lid = buyer_member.id, listing["id"]
+        btn_ok = discord.ui.Button(
+            label="✅ Confirmar", style=discord.ButtonStyle.success,
+            custom_id=f"bcmf:{uid}:{lid}",
+        )
+        btn_ok.callback = self._do_confirm
+        self.add_item(btn_ok)
+
+        btn_no = discord.ui.Button(
+            label="❌ Cancelar", style=discord.ButtonStyle.danger,
+            custom_id=f"bcmc:{uid}:{lid}",
+        )
+        btn_no.callback = self._do_cancel
+        self.add_item(btn_no)
+
+    async def _do_confirm(self, interaction: discord.Interaction):
+        if self._done:
+            await interaction.response.defer()
+            return
+        self._done = True
+        self.stop()
+        for c in self.children:
+            c.disabled = True  # type: ignore[union-attr]
+        await interaction.response.edit_message(content="⏳ Processando…", embed=None, view=self)
+
+        db = self.bot.db
+        buyer = self.buyer_member
+        guild = self.guild
+        listing_id = self.listing["id"]
+
+        try:
+            # Re-fetch to guard race conditions
+            listing = await db.get_role_listing(listing_id)
+            if not listing:
+                await interaction.edit_original_response(
+                    content="❌ Este anúncio já foi comprado por outra pessoa.",
+                    embed=None, view=None,
+                )
+                return
+
+            role = guild.get_role(listing["role_id"])
+            if not role:
+                await interaction.edit_original_response(
+                    content="❌ O cargo deste anúncio foi removido do servidor.",
+                    embed=None, view=None,
+                )
+                return
+
+            price = listing["price"]
+            ok = await db.deduct_coins(buyer.id, guild.id, price)
+            if not ok:
+                await interaction.edit_original_response(
+                    content="❌ Saldo insuficiente no momento da confirmação.",
+                    embed=None, view=None,
+                )
+                return
+
+            seller_member = guild.get_member(listing["seller_id"])
+            if seller_member is None:
+                try:
+                    seller_member = await guild.fetch_member(listing["seller_id"])
+                except discord.HTTPException:
+                    seller_member = None
+
+            if seller_member:
+                try:
+                    await seller_member.remove_roles(
+                        role, reason=f"Venda no mercado para {buyer.display_name}"
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    await db.add_coins(buyer.id, guild.id, price)
+                    await interaction.edit_original_response(
+                        content="❌ Não consegui remover o cargo do vendedor. Verifique a hierarquia do bot.",
+                        embed=None, view=None,
+                    )
+                    return
+
+            try:
+                await buyer.add_roles(role, reason="Compra no mercado")
+            except discord.Forbidden:
+                await db.add_coins(buyer.id, guild.id, price)
+                if seller_member:
+                    try:
+                        await seller_member.add_roles(role, reason="Revertendo venda no mercado")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+                await interaction.edit_original_response(
+                    content="❌ Sem permissão para conceder o cargo. Moedas devolvidas.",
+                    embed=None, view=None,
+                )
+                return
+
+            await db.add_coins(listing["seller_id"], guild.id, price)
+            await db.remove_role_listing(listing_id)
+
+            seller_str = seller_member.mention if seller_member else f"`id:{listing['seller_id']}`"
+            success_embed = discord.Embed(
+                title="✅ Compra realizada!",
+                description=(
+                    f"Você adquiriu {role.mention} de {seller_str} "
+                    f"por `{price:,}` {SWEET_COIN}!"
+                ),
+                color=SUCCESS_COLOR,
+            )
+            await interaction.edit_original_response(content=None, embed=success_embed, view=None)
+
+            cog = self.bot.cogs.get("Shop")
+            if cog:
+                await cog._refresh_market_panel(guild)  # type: ignore[union-attr]
+
+        except Exception:
+            log.exception("Erro na compra do mercado")
+            try:
+                await interaction.edit_original_response(
+                    content="❌ Erro ao processar. Tente de novo.", embed=None, view=None,
+                )
+            except Exception:
+                pass
+
+    async def _do_cancel(self, interaction: discord.Interaction):
+        if self._done:
+            await interaction.response.defer()
+            return
+        self._done = True
+        self.stop()
+        for c in self.children:
+            c.disabled = True  # type: ignore[union-attr]
+        await interaction.response.edit_message(content="🚫 Compra cancelada.", embed=None, view=None)
 
 
 # ── Custom Role Modal ─────────────────────────────────────────────────────────
@@ -390,44 +608,9 @@ class ShopPanelView(discord.ui.View):
                 ),
                 color=WARNING_COLOR,
             )
-            confirm_view = BuyConfirmView(label=item["name"])
-            await interaction.followup.send(
-                embed=confirm_embed, view=confirm_view, ephemeral=True
-            )
-            await confirm_view.wait()
-
-            if not confirm_view.confirmed:
-                return
-
-            ok_buy = await db.buy_item(member.id, guild.id, item_id, price)
-            if not ok_buy:
-                await interaction.followup.send(
-                    "❌ Não foi possível concluir a compra (saldo insuficiente ou item já comprado).",
-                    ephemeral=True,
-                )
-                return
-
-            try:
-                await member.add_roles(role, reason=f"Compra na loja: {item['name']}")
-            except discord.Forbidden:
-                await db.remove_shop_purchase(member.id, guild.id, item_id)
-                await db.add_coins(member.id, guild.id, price)
-                await interaction.followup.send(
-                    "❌ Não tenho permissão para conceder esse cargo. Suas moedas foram devolvidas.",
-                    ephemeral=True,
-                )
-                return
-
-            bal_now = (await db.get_user(member.id, guild.id))["balance"]
-            success_embed = discord.Embed(
-                title="✅ Compra realizada!",
-                description=(
-                    f"Você adquiriu {emoji_str} **{item['name']}** e recebeu {role.mention}!\n"
-                    f"Saldo restante: `{bal_now:,}` {SWEET_COIN}"
-                ),
-                color=SUCCESS_COLOR,
-            )
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
+            confirm_view = BuyConfirmView(self.bot, member, guild, item)
+            await interaction.followup.send(embed=confirm_embed, view=confirm_view, ephemeral=True)
+            # BuyConfirmView handles all purchase logic internally — nothing to do here.
 
         except discord.HTTPException as exc:
             log.warning("Erro HTTP na compra da loja: %s", exc)
@@ -547,6 +730,18 @@ class MarketView(discord.ui.View):
                 )
                 return
 
+            buyer_member = interaction.member
+            if buyer_member is None:
+                try:
+                    buyer_member = await guild.fetch_member(buyer_id)
+                except discord.HTTPException:
+                    buyer_member = None
+            if buyer_member is None:
+                await interaction.followup.send(
+                    "❌ Não consegui obter seu membro neste servidor.", ephemeral=True
+                )
+                return
+
             seller = guild.get_member(listing["seller_id"])
             seller_str = seller.mention if seller else f"`id:{listing['seller_id']}`"
 
@@ -560,97 +755,9 @@ class MarketView(discord.ui.View):
                 ),
                 color=WARNING_COLOR,
             )
-            confirm_view = BuyConfirmView(label=role.name)
-            await interaction.followup.send(
-                embed=confirm_embed, view=confirm_view, ephemeral=True
-            )
-            await confirm_view.wait()
-
-            if not confirm_view.confirmed:
-                return
-
-            # Re-fetch to guard race conditions
-            listing = await db.get_role_listing(listing_id)
-            if not listing:
-                await interaction.followup.send(
-                    "❌ Este anúncio já foi comprado por outra pessoa.", ephemeral=True
-                )
-                return
-
-            buyer_member = interaction.member
-            if buyer_member is None:
-                try:
-                    buyer_member = await guild.fetch_member(buyer_id)
-                except discord.HTTPException:
-                    buyer_member = None
-            if buyer_member is None:
-                await interaction.followup.send(
-                    "❌ Não consegui obter seu membro neste servidor.", ephemeral=True
-                )
-                return
-
-            seller_member = guild.get_member(listing["seller_id"])
-            if seller_member is None:
-                try:
-                    seller_member = await guild.fetch_member(listing["seller_id"])
-                except discord.HTTPException:
-                    seller_member = None
-
-            ok = await db.deduct_coins(buyer_id, guild.id, price)
-            if not ok:
-                await interaction.followup.send(
-                    "❌ Saldo insuficiente no momento da confirmação.", ephemeral=True
-                )
-                return
-
-            seller_removed = False
-            if seller_member:
-                try:
-                    await seller_member.remove_roles(
-                        role, reason=f"Venda no mercado para {buyer_member.display_name}"
-                    )
-                    seller_removed = True
-                except (discord.Forbidden, discord.HTTPException):
-                    await db.add_coins(buyer_id, guild.id, price)
-                    await interaction.followup.send(
-                        "❌ Não consegui remover o cargo do vendedor. Verifique a hierarquia do bot.",
-                        ephemeral=True,
-                    )
-                    return
-
-            try:
-                await buyer_member.add_roles(
-                    role, reason=f"Compra no mercado de {seller_str}"
-                )
-            except discord.Forbidden:
-                await db.add_coins(buyer_id, guild.id, price)
-                if seller_member and seller_removed:
-                    try:
-                        await seller_member.add_roles(role, reason="Revertendo mercado")
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
-                await interaction.followup.send(
-                    "❌ Não tenho permissão para conceder esse cargo. Moedas devolvidas.",
-                    ephemeral=True,
-                )
-                return
-
-            await db.add_coins(listing["seller_id"], guild.id, price)
-            await db.remove_role_listing(listing_id)
-
-            success_embed = discord.Embed(
-                title="✅ Compra realizada!",
-                description=(
-                    f"Você adquiriu {role.mention} de {seller_str} "
-                    f"por `{price:,}` {SWEET_COIN}!"
-                ),
-                color=SUCCESS_COLOR,
-            )
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-
-            cog = self.bot.cogs.get("Shop")
-            if cog:
-                await cog._refresh_market_panel(guild)
+            confirm_view = MarketBuyConfirmView(self.bot, buyer_member, guild, listing)
+            await interaction.followup.send(embed=confirm_embed, view=confirm_view, ephemeral=True)
+            # MarketBuyConfirmView handles all purchase logic internally — nothing to do here.
 
         except discord.HTTPException as exc:
             log.warning("Erro HTTP na compra do mercado: %s", exc)

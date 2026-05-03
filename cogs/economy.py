@@ -899,47 +899,72 @@ class Economy(commands.Cog):
             return
 
         crash = sample_foguetinho_crash()
-        await asyncio.sleep(1)
 
+        # Determine where the action ends: either the player's target or the crash point
         meta_cents = round(meta * 100)
         crash_cents = round(crash * 100)
-        if meta_cents < crash_cents:
+        won = meta_cents < crash_cents
+        end_mult = meta if won else crash
+
+        # --- launch message ---
+        launch_emb = discord.Embed(
+            title="🚀 Foguetinho — Decolando!",
+            description=f"**Alvo:** ×{meta:.2f} | **Aposta:** {SWEET_COIN_EMOJI} {valor:,}",
+            color=BOT_COLOR,
+        )
+        launch_emb.add_field(name="Multiplicador", value="×1.00 🚀", inline=False)
+        msg = await interaction.followup.send(embed=launch_emb, wait=True)
+
+        # --- animated climb ---
+        for step in range(1, 4):
+            frac = step / 3
+            current = round(1.0 + (end_mult - 1.0) * frac, 2)
+            filled = int(frac * 10)
+            bar = "▓" * filled + "░" * (10 - filled)
+            step_emb = discord.Embed(
+                title="🚀 Foguetinho — Subindo!",
+                description=f"**Alvo:** ×{meta:.2f} | **Aposta:** {SWEET_COIN_EMOJI} {valor:,}",
+                color=BOT_COLOR,
+            )
+            step_emb.add_field(name=f"[{bar}]", value=f"×{current:.2f} 🚀", inline=False)
+            await msg.edit(embed=step_emb)
+            await asyncio.sleep(0.65)
+
+        await asyncio.sleep(0.4)
+
+        # --- final result ---
+        if won:
             payout = int(round(valor * meta))
             if payout <= 0:
                 payout = valor
-
             await db.add_coins(user_id, interaction.guild_id, payout)
             net = payout - valor
             emb = discord.Embed(
-                title="🚀 Foguetinho — Boa!",
+                title="🚀 Foguetinho — Sacou!",
                 description=(
-                    f"O foguetinho **voou até ×{crash:,.2f}** antes de estourar.\n"
-                    f"Seu alvo (**×{meta:,.2f}**) ficou dentro do limite!"
+                    f"Sacou em ×**{meta:.2f}** antes do crash em ×**{crash:.2f}**!"
                 ),
                 color=SUCCESS_COLOR,
             )
             emb.add_field(
                 name="Ganhou",
-                value=f"+{SWEET_COIN_EMOJI} **{net:,}** — total creditado **{payout:,}**",
-                inline=False,
+                value=f"+{SWEET_COIN_EMOJI} **{net:,}** (total: **{payout:,}**)",
+                inline=True,
             )
         else:
             emb = discord.Embed(
-                title="🚀 Foguetinho — Estourou antes!",
+                title="💥 Foguetinho — Crashou!",
                 description=(
-                    f"O foguetinho parou em **×{crash:,.2f}** antes do seu alvo (**×{meta:,.2f}**).\n"
-                    f"Você perdeu sua aposta de {SWEET_COIN_EMOJI} **{valor:,}**."
+                    f"Crashou em ×**{crash:.2f}** antes do seu alvo ×**{meta:.2f}**!\n"
+                    f"Você perdeu {SWEET_COIN_EMOJI} **{valor:,}**."
                 ),
                 color=ERROR_COLOR,
             )
 
-        emb.add_field(
-            name="Resultado técnico",
-            value=f"Crash: ×{crash:,.2f} • seu alvo: ×{meta:,.2f}",
-            inline=False,
-        )
+        emb.add_field(name="Crash", value=f"×{crash:.2f}", inline=True)
+        emb.add_field(name="Seu alvo", value=f"×{meta:.2f}", inline=True)
         emb.set_footer(text="Ganhar = alvo menor que o ponto de crash.")
-        await interaction.followup.send(embed=emb)
+        await msg.edit(embed=emb)
 
     @apostar_group.command(name="roleta", description="Jogue roleta europeia com Sweet Coins")
     @app_commands.describe(
