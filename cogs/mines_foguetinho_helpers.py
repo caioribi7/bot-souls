@@ -268,4 +268,8 @@ class MinesBombinhaView(discord.ui.View):
             f"\n\n💰 Você sacou **{SWEET_COIN_EMOJI} {payout:,}** ( lucro líquido **+{profit:,}** )."
         )
         emb.color = SUCCESS_COLOR
-        await interaction.response.edit_message(embed=emb, view=None)
+        try:
+            await interaction.response.edit_message(embed=emb, view=None)
+        except discord.HTTPException:
+            if interaction.message:
+                await interaction.message.edit(embed=emb, view=None)

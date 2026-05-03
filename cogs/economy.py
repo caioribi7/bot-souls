@@ -877,7 +877,9 @@ class Economy(commands.Cog):
         crash = sample_foguetinho_crash()
         await asyncio.sleep(1)
 
-        if meta < crash:
+        meta_cents = round(meta * 100)
+        crash_cents = round(crash * 100)
+        if meta_cents < crash_cents:
             payout = int(round(valor * meta))
             if payout <= 0:
                 payout = valor

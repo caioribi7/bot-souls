@@ -409,16 +409,51 @@ class Database:
             ) as cur:
                 return await cur.fetchone() is not None
 
-    async def buy_item(self, user_id: int, guild_id: int, item_id: int, price: int):
+    async def buy_item(self, user_id: int, guild_id: int, item_id: int, price: int) -> bool:
+        """Debita saldo e registra compra atomicamente. Falha se saldo baixo ou já comprou."""
         async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+
+            async with db.execute(
+                "SELECT balance FROM users WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id),
+            ) as cur:
+                row = await cur.fetchone()
+
+            if row is None or row[0] < price:
+                await db.rollback()
+                return False
+
+            async with db.execute(
+                "SELECT 1 FROM user_purchases WHERE user_id=? AND guild_id=? AND item_id=?",
+                (user_id, guild_id, item_id),
+            ) as cur:
+                if await cur.fetchone():
+                    await db.rollback()
+                    return False
+
             await db.execute(
-                "UPDATE users SET balance=balance-? WHERE user_id=? AND guild_id=?",
-                (price, user_id, guild_id),
+                "UPDATE users SET balance=balance-? WHERE user_id=? AND guild_id=? AND balance>=?",
+                (price, user_id, guild_id, price),
             )
+            if db.total_changes == 0:
+                await db.rollback()
+                return False
+
             await db.execute(
-                "INSERT OR IGNORE INTO user_purchases (user_id,guild_id,item_id,purchased_at)"
+                "INSERT INTO user_purchases (user_id,guild_id,item_id,purchased_at)"
                 " VALUES (?,?,?,?)",
                 (user_id, guild_id, item_id, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+            return True
+
+    async def remove_shop_purchase(self, user_id: int, guild_id: int, item_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "DELETE FROM user_purchases WHERE user_id=? AND guild_id=? AND item_id=?",
+                (user_id, guild_id, item_id),
             )
             await db.commit()
 
