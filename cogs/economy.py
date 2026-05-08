@@ -356,7 +356,7 @@ class Economy(commands.Cog):
 
         db = self.bot.db
         user_data = await db.get_user(target.id, interaction.guild_id)
-        rank = await db.get_rank(target.id, interaction.guild_id)
+        rank = await db.get_rank(target.id, interaction.guild_id, by="balance")
 
         embed = discord.Embed(
             title=f"{SWEET_COIN_EMOJI} Saldo de {target.display_name}",
@@ -445,7 +445,7 @@ class Economy(commands.Cog):
     @banco_group.command(name="ranking", description="Top 10 membros mais ricos do servidor")
     async def ranking(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        top = await self.bot.db.get_leaderboard(interaction.guild_id)
+        top = await self.bot.db.get_leaderboard(interaction.guild_id, by="balance")
 
         embed = discord.Embed(
             title=f"{SWEET_COIN_EMOJI} Ranking de Sweet Coins",
@@ -1185,7 +1185,7 @@ class Economy(commands.Cog):
     @app_commands.command(name="leaderboard_coins", description="Top 10 membros mais ricos do servidor (Alias de /banco ranking)")
     async def leaderboard_coins(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        top = await self.bot.db.get_leaderboard(interaction.guild_id)
+        top = await self.bot.db.get_leaderboard(interaction.guild_id, by="balance")
 
         embed = discord.Embed(
             title=f"{SWEET_COIN_EMOJI} Ranking de Sweet Coins",

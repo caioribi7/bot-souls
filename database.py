@@ -406,21 +406,23 @@ class Database:
             await db.commit()
             return db.total_changes > 0
 
-    async def get_leaderboard(self, guild_id: int, limit: int = 10) -> list[dict]:
+    async def get_leaderboard(self, guild_id: int, limit: int = 10, by: str = "xp") -> list[dict]:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
+            col = "balance" if by == "balance" else "xp"
             async with db.execute(
-                "SELECT * FROM users WHERE guild_id=? ORDER BY xp DESC LIMIT ?",
+                f"SELECT * FROM users WHERE guild_id=? ORDER BY {col} DESC LIMIT ?",
                 (guild_id, limit),
             ) as cur:
                 return [dict(r) for r in await cur.fetchall()]
 
-    async def get_rank(self, user_id: int, guild_id: int) -> int:
+    async def get_rank(self, user_id: int, guild_id: int, by: str = "xp") -> int:
         async with aiosqlite.connect(self.path) as db:
+            col = "balance" if by == "balance" else "xp"
             async with db.execute(
-                """
+                f"""
                 SELECT COUNT(*)+1 FROM users
-                WHERE guild_id=? AND xp>(SELECT xp FROM users WHERE user_id=? AND guild_id=?)
+                WHERE guild_id=? AND {col}>(SELECT {col} FROM users WHERE user_id=? AND guild_id=?)
                 """,
                 (guild_id, user_id, guild_id),
             ) as cur:
