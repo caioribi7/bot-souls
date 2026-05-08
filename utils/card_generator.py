@@ -475,7 +475,9 @@ async def generate_shop_card(
         "xp_multiplier": 1.0,
         "_custom": True,
     }
-    all_rows: list[dict] = regular + [custom_row]
+    
+    display_rows = regular[:10]
+    all_rows: list[dict] = display_rows + [custom_row]
     height = HDR_H + len(all_rows) * ROW_H + FTR_H
 
     t = THEMES.get(theme, THEMES["escuro"])
@@ -521,8 +523,7 @@ async def generate_shop_card(
 
     n = len(regular)
     sub = (
-        f"{n} {'item' if n == 1 else 'itens'} disponíveis"
-        f"  •  Personalizado: {custom_role_price:,} moedas"
+        f"{n} {'item' if n == 1 else 'itens'} na loja (clique em 🛒 Ver Loja para comprar)"
     )
     stw = _tw(draw, sub, fonts["sub"])
     draw.text(((WIDTH - stw) // 2, 48), sub, font=fonts["sub"], fill=(255, 244, 200, 215))

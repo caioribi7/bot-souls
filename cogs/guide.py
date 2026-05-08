@@ -85,12 +85,12 @@ class GuideView(discord.ui.View):
             "🏪 Loja e Mercado",
             "\n".join(
                 [
-                    "Use o painel da loja com botões para comprar cargos",
-                    "✨ Criar Cargo Personalizado direto no painel",
-                    "`/mercado listar cargo preco` - vender cargo",
-                    "`/mercado cancelar id` - cancelar anúncio",
-                    "`/mercado lista` - ver anúncios",
-                    "`/inventario` - itens/cargos comprados",
+                    "Clique em **🛒 Ver Loja** no painel para abrir o catálogo",
+                    "Clique em **✨ Criar Cargo** para criar seu cargo personalizado",
+                    "Clique em **🔄 Mercado** para comprar cargos de outros jogadores",
+                    "Clique em **🎒 Meu Inventário** para equipar e desequipar seus cargos",
+                    "`/mercado listar cargo preco` - vender cargo no mercado",
+                    "`/mercado cancelar id` - cancelar seu anúncio",
                 ]
             ),
         )

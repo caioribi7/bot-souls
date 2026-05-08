@@ -480,112 +480,94 @@ class CustomRoleModal(discord.ui.Modal, title="✨ Criar Cargo Personalizado"):
             await cog._refresh_shop_panel(guild)
 
 
-# ── Shop Panel View ───────────────────────────────────────────────────────────
+# ── Ephemeral Views ───────────────────────────────────────────────────────────
 
-class ShopPanelView(discord.ui.View):
-    """Persistent view attached to the shop panel message."""
-
-    def __init__(
-        self,
-        bot: commands.Bot,
-        guild_id: int,
-        items: list[dict],
-        shop_config: dict,
-    ):
-        super().__init__(timeout=None)
+class EphemeralShopView(discord.ui.View):
+    def __init__(self, bot: commands.Bot, guild: discord.Guild, member: discord.Member, items: list[dict], shop_config: dict, page: int = 0):
+        super().__init__(timeout=120)
         self.bot = bot
-        self.guild_id = guild_id
-        self._build(items, shop_config)
+        self.guild = guild
+        self.member = member
+        self.items = [i for i in items if not i.get("is_custom")]
+        self.shop_config = shop_config
+        self.page = page
+        self._build()
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild_id != self.guild_id:
-            await interaction.response.send_message(
-                "Este painel pertence a outro servidor.", ephemeral=True
-            )
-            return False
-        return True
+    def _build(self):
+        self.clear_items()
+        start = self.page * 25
+        end = start + 25
+        page_items = self.items[start:end]
 
-    def _build(self, items: list[dict], shop_config: dict):
-        while self.children:
-            self.remove_item(self.children[0])
-
-        gid = self.guild_id
-        regular = [i for i in items if not i.get("is_custom")]
-
-        for item in regular[:MAX_ITEMS_PER_PAGE - 1]:
-            emoji_str = item.get("emoji") or "🎭"
-            label = _truncate(f"{emoji_str} {item['name']} — {item['price']:,}{SWEET_COIN}", 80)
-            btn = discord.ui.Button(
-                label=label,
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"sb:{gid}:{item['id']}",
-            )
-            btn.callback = self._make_item_callback(item["id"])
+        if not page_items:
+            btn = discord.ui.Button(label="Loja Vazia", disabled=True)
             self.add_item(btn)
+            return
 
-        custom_price = shop_config.get("custom_role_price", 5000)
-        create_btn = discord.ui.Button(
-            label=f"✨ Criar Cargo — {custom_price:,}{SWEET_COIN}",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"scr:{gid}",
-        )
-        create_btn.callback = self._create_role_callback
-        self.add_item(create_btn)
+        options = []
+        for item in page_items:
+            emoji_str = item.get("emoji") or "🎭"
+            desc = _truncate(f"{item['price']:,}{SWEET_COIN} | {item.get('description', '')}", 95)
+            options.append(
+                discord.SelectOption(
+                    label=item["name"][:100],
+                    description=desc,
+                    value=str(item["id"]),
+                    emoji=emoji_str
+                )
+            )
 
-    def _make_item_callback(self, item_id: int):
-        async def callback(interaction: discord.Interaction):
+        select = discord.ui.Select(placeholder="Selecione um cargo para comprar...", options=options)
+
+        async def select_callback(interaction: discord.Interaction):
+            item_id = int(select.values[0])
             await self._handle_buy_item(interaction, item_id)
-        return callback
+
+        select.callback = select_callback
+        self.add_item(select)
+
+        if start > 0:
+            btn_prev = discord.ui.Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary)
+            async def prev_cb(interaction: discord.Interaction):
+                self.page -= 1
+                self._build()
+                await interaction.response.edit_message(view=self)
+            btn_prev.callback = prev_cb
+            self.add_item(btn_prev)
+
+        if end < len(self.items):
+            btn_next = discord.ui.Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary)
+            async def next_cb(interaction: discord.Interaction):
+                self.page += 1
+                self._build()
+                await interaction.response.edit_message(view=self)
+            btn_next.callback = next_cb
+            self.add_item(btn_next)
 
     async def _handle_buy_item(self, interaction: discord.Interaction, item_id: int):
         db = self.bot.db
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "Use a loja dentro de um servidor.", ephemeral=True
-            )
-            return
-
+        guild = self.guild
+        member = self.member
+        
         await interaction.response.defer(ephemeral=True)
 
         try:
-            member = interaction.user
-            if member is None:
-                try:
-                    member = await guild.fetch_member(interaction.user.id)
-                except discord.HTTPException:
-                    member = None
-            if member is None:
-                await interaction.followup.send(
-                    "❌ Não consegui obter seu membro. Tente de novo.", ephemeral=True
-                )
-                return
-
             item = await db.get_shop_item(item_id)
             if not item or item["guild_id"] != guild.id:
-                await interaction.followup.send(
-                    "❌ Este item não está mais disponível.", ephemeral=True
-                )
+                await interaction.followup.send("❌ Este item não está mais disponível.", ephemeral=True)
                 return
 
             role = guild.get_role(item["role_id"])
             if not role:
-                await interaction.followup.send(
-                    "❌ O cargo deste item foi removido do servidor. Avise um administrador.",
-                    ephemeral=True,
-                )
+                await interaction.followup.send("❌ O cargo deste item foi removido do servidor. Avise um administrador.", ephemeral=True)
                 return
 
             if role in member.roles:
-                await interaction.followup.send(
-                    f"❌ Você já possui o cargo **{item['name']}**.", ephemeral=True
-                )
+                await interaction.followup.send(f"❌ Você já possui o cargo **{item['name']}**.", ephemeral=True)
                 return
 
             if await db.has_purchased(member.id, guild.id, item_id):
-                await interaction.followup.send(
-                    f"❌ Você já comprou **{item['name']}**.", ephemeral=True
-                )
+                await interaction.followup.send(f"❌ Você já comprou **{item['name']}**.", ephemeral=True)
                 return
 
             user = await db.get_user(member.id, guild.id)
@@ -593,113 +575,93 @@ class ShopPanelView(discord.ui.View):
             if user["balance"] < price:
                 await interaction.followup.send(
                     f"❌ Saldo insuficiente! Você tem `{user['balance']:,}` {SWEET_COIN}, "
-                    f"mas **{item['name']}** custa `{price:,}` {SWEET_COIN}.",
-                    ephemeral=True,
-                )
+                    f"mas **{item['name']}** custa `{price:,}` {SWEET_COIN}.", ephemeral=True)
                 return
 
             emoji_str = item.get("emoji") or "🎭"
             confirm_embed = discord.Embed(
                 title="🛒 Confirmar compra",
-                description=(
-                    f"{emoji_str} **{item['name']}**\n"
-                    f"Preço: `{price:,}` {SWEET_COIN}\n"
-                    f"Saldo após compra: `{user['balance'] - price:,}` {SWEET_COIN}"
-                ),
+                description=(f"{emoji_str} **{item['name']}**\n"
+                             f"Preço: `{price:,}` {SWEET_COIN}\n"
+                             f"Saldo após compra: `{user['balance'] - price:,}` {SWEET_COIN}"),
                 color=WARNING_COLOR,
             )
             confirm_view = BuyConfirmView(self.bot, member, guild, item)
             await interaction.followup.send(embed=confirm_embed, view=confirm_view, ephemeral=True)
-            # BuyConfirmView handles all purchase logic internally — nothing to do here.
 
         except discord.HTTPException as exc:
             log.warning("Erro HTTP na compra da loja: %s", exc)
-            try:
-                await interaction.followup.send(
-                    "❌ Falha ao falar com o Discord. Tente de novo.", ephemeral=True
-                )
-            except discord.HTTPException:
-                pass
         except Exception:
             log.exception("Erro inesperado na compra da loja")
-            try:
-                await interaction.followup.send(
-                    "❌ Erro ao processar. Tente de novo ou avise a staff.", ephemeral=True
-                )
-            except discord.HTTPException:
-                pass
 
-    async def _create_role_callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "Use a loja dentro de um servidor.", ephemeral=True
-            )
-            return
-        await interaction.response.send_modal(CustomRoleModal(self.bot))
-
-
-# ── Market View ───────────────────────────────────────────────────────────────
-
-class MarketView(discord.ui.View):
-    """Persistent view for the role market panel."""
-
-    def __init__(self, bot: commands.Bot, guild_id: int, listings: list[dict]):
-        super().__init__(timeout=None)
+class EphemeralMarketView(discord.ui.View):
+    def __init__(self, bot: commands.Bot, guild: discord.Guild, member: discord.Member, listings: list[dict], page: int = 0):
+        super().__init__(timeout=120)
         self.bot = bot
-        self.guild_id = guild_id
-        self._build(listings)
+        self.guild = guild
+        self.member = member
+        self.listings = listings
+        self.page = page
+        self._build()
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild_id != self.guild_id:
-            await interaction.response.send_message(
-                "Este mercado pertence a outro servidor.", ephemeral=True
-            )
-            return False
-        return True
+    def _build(self):
+        self.clear_items()
+        start = self.page * 25
+        end = start + 25
+        page_items = self.listings[start:end]
 
-    def _build(self, listings: list[dict]):
-        while self.children:
-            self.remove_item(self.children[0])
-
-        gid = self.guild_id
-        for listing in listings[:20]:
-            lid = listing["id"]
-            price = listing["price"]
-            label = _truncate(f"Comprar #{lid} — {price:,}{SWEET_COIN}", 80)
-            btn = discord.ui.Button(
-                label=label,
-                style=discord.ButtonStyle.success,
-                custom_id=f"mb:{gid}:{lid}",
-            )
-            btn.callback = self._make_buy_callback(lid)
+        if not page_items:
+            btn = discord.ui.Button(label="Mercado Vazio", disabled=True)
             self.add_item(btn)
+            return
 
-        if not listings:
-            placeholder = discord.ui.Button(
-                label="Sem itens no mercado",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"me:{gid}",
-                disabled=True,
+        options = []
+        for lst in page_items:
+            role = self.guild.get_role(lst["role_id"])
+            role_name = role.name if role else "Cargo Removido"
+            seller = self.guild.get_member(lst["seller_id"])
+            seller_name = seller.display_name if seller else f"ID: {lst['seller_id']}"
+            options.append(
+                discord.SelectOption(
+                    label=f"#{lst['id']} {role_name}"[:100],
+                    description=f"{lst['price']:,}{SWEET_COIN} | Vendido por {seller_name}"[:100],
+                    value=str(lst["id"]),
+                    emoji="🏷️"
+                )
             )
-            self.add_item(placeholder)
 
-    def _make_buy_callback(self, listing_id: int):
-        async def callback(interaction: discord.Interaction):
+        select = discord.ui.Select(placeholder="Selecione um anúncio para comprar...", options=options)
+
+        async def select_callback(interaction: discord.Interaction):
+            listing_id = int(select.values[0])
             await self._handle_market_buy(interaction, listing_id)
-        return callback
+
+        select.callback = select_callback
+        self.add_item(select)
+
+        if start > 0:
+            btn_prev = discord.ui.Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary)
+            async def prev_cb(interaction: discord.Interaction):
+                self.page -= 1
+                self._build()
+                await interaction.response.edit_message(view=self)
+            btn_prev.callback = prev_cb
+            self.add_item(btn_prev)
+
+        if end < len(self.listings):
+            btn_next = discord.ui.Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary)
+            async def next_cb(interaction: discord.Interaction):
+                self.page += 1
+                self._build()
+                await interaction.response.edit_message(view=self)
+            btn_next.callback = next_cb
+            self.add_item(btn_next)
 
     async def _handle_market_buy(self, interaction: discord.Interaction, listing_id: int):
         db = self.bot.db
-        guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message(
-                "Use o mercado dentro de um servidor.", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
+        guild = self.guild
         buyer_id = interaction.user.id
+        await interaction.response.defer(ephemeral=True)
 
         try:
             listing = await db.get_role_listing(listing_id)
@@ -708,16 +670,12 @@ class MarketView(discord.ui.View):
                 return
 
             if listing["seller_id"] == buyer_id:
-                await interaction.followup.send(
-                    "❌ Você não pode comprar seu próprio anúncio.", ephemeral=True
-                )
+                await interaction.followup.send("❌ Você não pode comprar seu próprio anúncio.", ephemeral=True)
                 return
 
             role = guild.get_role(listing["role_id"])
             if not role:
-                await interaction.followup.send(
-                    "❌ O cargo deste anúncio foi removido do servidor.", ephemeral=True
-                )
+                await interaction.followup.send("❌ O cargo deste anúncio foi removido do servidor.", ephemeral=True)
                 return
 
             price = listing["price"]
@@ -725,21 +683,7 @@ class MarketView(discord.ui.View):
             if user["balance"] < price:
                 await interaction.followup.send(
                     f"❌ Saldo insuficiente! Você tem `{user['balance']:,}` {SWEET_COIN}, "
-                    f"mas este cargo custa `{price:,}` {SWEET_COIN}.",
-                    ephemeral=True,
-                )
-                return
-
-            buyer_member = interaction.user
-            if buyer_member is None:
-                try:
-                    buyer_member = await guild.fetch_member(buyer_id)
-                except discord.HTTPException:
-                    buyer_member = None
-            if buyer_member is None:
-                await interaction.followup.send(
-                    "❌ Não consegui obter seu membro neste servidor.", ephemeral=True
-                )
+                    f"mas este cargo custa `{price:,}` {SWEET_COIN}.", ephemeral=True)
                 return
 
             seller = guild.get_member(listing["seller_id"])
@@ -747,34 +691,165 @@ class MarketView(discord.ui.View):
 
             confirm_embed = discord.Embed(
                 title="🛒 Confirmar compra no mercado",
-                description=(
-                    f"Cargo: {role.mention}\n"
-                    f"Vendedor: {seller_str}\n"
-                    f"Preço: `{price:,}` {SWEET_COIN}\n"
-                    f"Saldo após compra: `{user['balance'] - price:,}` {SWEET_COIN}"
-                ),
+                description=(f"Cargo: {role.mention}\n"
+                             f"Vendedor: {seller_str}\n"
+                             f"Preço: `{price:,}` {SWEET_COIN}\n"
+                             f"Saldo após compra: `{user['balance'] - price:,}` {SWEET_COIN}"),
                 color=WARNING_COLOR,
             )
-            confirm_view = MarketBuyConfirmView(self.bot, buyer_member, guild, listing)
+            confirm_view = MarketBuyConfirmView(self.bot, interaction.user, guild, listing)
             await interaction.followup.send(embed=confirm_embed, view=confirm_view, ephemeral=True)
-            # MarketBuyConfirmView handles all purchase logic internally — nothing to do here.
 
         except discord.HTTPException as exc:
             log.warning("Erro HTTP na compra do mercado: %s", exc)
-            try:
-                await interaction.followup.send(
-                    "❌ Falha ao falar com o Discord. Tente de novo.", ephemeral=True
-                )
-            except discord.HTTPException:
-                pass
         except Exception:
             log.exception("Erro inesperado na compra do mercado")
-            try:
-                await interaction.followup.send(
-                    "❌ Erro ao processar. Tente de novo ou avise a staff.", ephemeral=True
+
+class EphemeralInventoryView(discord.ui.View):
+    def __init__(self, bot: commands.Bot, guild: discord.Guild, member: discord.Member, purchases: list[dict], page: int = 0):
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.guild = guild
+        self.member = member
+        self.purchases = purchases
+        self.page = page
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        start = self.page * 25
+        end = start + 25
+        page_items = self.purchases[start:end]
+
+        if not page_items:
+            btn = discord.ui.Button(label="Inventário Vazio", disabled=True)
+            self.add_item(btn)
+            return
+
+        options = []
+        for p in page_items:
+            role = self.guild.get_role(p["role_id"])
+            role_name = role.name if role else "Cargo Removido"
+            equipped = role in self.member.roles if role else False
+            status = "Equipado" if equipped else "Desequipado"
+            emoji_str = "✅" if equipped else "🎒"
+            options.append(
+                discord.SelectOption(
+                    label=role_name[:100],
+                    description=f"{p['name'][:50]} | {status}",
+                    value=str(p['id']),
+                    emoji=emoji_str
                 )
-            except discord.HTTPException:
-                pass
+            )
+
+        select = discord.ui.Select(placeholder="Selecione um cargo para Equipar/Desequipar...", options=options)
+
+        async def select_callback(interaction: discord.Interaction):
+            item_id = int(select.values[0])
+            await self._handle_toggle(interaction, item_id)
+
+        select.callback = select_callback
+        self.add_item(select)
+
+        if start > 0:
+            btn_prev = discord.ui.Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary)
+            async def prev_cb(interaction: discord.Interaction):
+                self.page -= 1
+                self._build()
+                await interaction.response.edit_message(view=self)
+            btn_prev.callback = prev_cb
+            self.add_item(btn_prev)
+
+        if end < len(self.purchases):
+            btn_next = discord.ui.Button(label="Próxima ➡️", style=discord.ButtonStyle.secondary)
+            async def next_cb(interaction: discord.Interaction):
+                self.page += 1
+                self._build()
+                await interaction.response.edit_message(view=self)
+            btn_next.callback = next_cb
+            self.add_item(btn_next)
+
+    async def _handle_toggle(self, interaction: discord.Interaction, item_id: int):
+        db = self.bot.db
+        guild = self.guild
+        member = interaction.user
+        
+        await interaction.response.defer(ephemeral=True)
+        try:
+            item = await db.get_shop_item(item_id)
+            if not item:
+                await interaction.followup.send("❌ Este item não existe mais.", ephemeral=True)
+                return
+
+            role = guild.get_role(item["role_id"])
+            if not role:
+                await interaction.followup.send("❌ O cargo deste item foi removido do servidor.", ephemeral=True)
+                return
+
+            if role in member.roles:
+                await member.remove_roles(role, reason="Desequipado via Inventário")
+                await interaction.followup.send(f"🎒 Você desequipou o cargo **{role.name}**.", ephemeral=True)
+            else:
+                await member.add_roles(role, reason="Equipado via Inventário")
+                await interaction.followup.send(f"✅ Você equipou o cargo **{role.name}**.", ephemeral=True)
+                
+            self._build()
+            await interaction.edit_original_response(view=self)
+
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Não tenho permissão para alterar seus cargos.", ephemeral=True)
+        except Exception:
+            log.exception("Erro no toggle de inventário")
+
+# ── Shop Panel View ───────────────────────────────────────────────────────────
+
+class ShopPanelView(discord.ui.View):
+    def __init__(self, bot: commands.Bot, guild_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = guild_id
+        
+        btn_shop = discord.ui.Button(label="🛒 Ver Loja", style=discord.ButtonStyle.primary, custom_id=f"sp_shop:{guild_id}")
+        btn_shop.callback = self._open_shop
+        self.add_item(btn_shop)
+        
+        btn_custom = discord.ui.Button(label="✨ Criar Cargo", style=discord.ButtonStyle.success, custom_id=f"sp_custom:{guild_id}")
+        btn_custom.callback = self._create_role
+        self.add_item(btn_custom)
+        
+        btn_market = discord.ui.Button(label="🔄 Mercado", style=discord.ButtonStyle.secondary, custom_id=f"sp_market:{guild_id}")
+        btn_market.callback = self._open_market
+        self.add_item(btn_market)
+        
+        btn_inv = discord.ui.Button(label="🎒 Meu Inventário", style=discord.ButtonStyle.secondary, custom_id=f"sp_inv:{guild_id}")
+        btn_inv.callback = self._open_inventory
+        self.add_item(btn_inv)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message("Este painel pertence a outro servidor.", ephemeral=True)
+            return False
+        return True
+
+    async def _open_shop(self, interaction: discord.Interaction):
+        items = await self.bot.db.get_shop(self.guild_id)
+        shop_config = await self.bot.db.get_shop_config(self.guild_id)
+        view = EphemeralShopView(self.bot, interaction.guild, interaction.user, items, shop_config)
+        await interaction.response.send_message("🛒 **Catálogo da Loja**", view=view, ephemeral=True)
+
+    async def _create_role(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(CustomRoleModal(self.bot))
+
+    async def _open_market(self, interaction: discord.Interaction):
+        listings = await self.bot.db.get_role_listings(self.guild_id)
+        view = EphemeralMarketView(self.bot, interaction.guild, interaction.user, listings)
+        await interaction.response.send_message("🔄 **Mercado de Cargos**", view=view, ephemeral=True)
+
+    async def _open_inventory(self, interaction: discord.Interaction):
+        purchases = await self.bot.db.get_purchases(interaction.user.id, self.guild_id)
+        view = EphemeralInventoryView(self.bot, interaction.guild, interaction.user, purchases)
+        await interaction.response.send_message("🎒 **Seu Inventário de Cargos**", view=view, ephemeral=True)
+
 
 
 # ── Shop Cog ──────────────────────────────────────────────────────────────────
@@ -816,32 +891,15 @@ class Shop(commands.Cog):
         if gid is None:
             return
 
-        db = self.bot.db
         try:
-            if cid.startswith("shop_buy_"):
-                try:
-                    item_id = int(cid.split("shop_buy_", 1)[1])
-                except ValueError:
-                    return
-                items = await db.get_shop(gid)
-                cfg = await db.get_shop_config(gid)
-                view = ShopPanelView(self.bot, gid, items, cfg)
-                await view._handle_buy_item(interaction, item_id)
+            if cid.startswith(("shop_buy_", "shop_create_role", "market_buy_")):
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "❌ Este painel é antigo. Por favor, use o novo painel com o menu suspenso.",
+                        ephemeral=True,
+                    )
                 return
-
-            if cid == "shop_create_role":
-                await ShopPanelView(self.bot, gid, [], {})._create_role_callback(interaction)
-                return
-
-            if cid.startswith("market_buy_"):
-                try:
-                    listing_id = int(cid.split("market_buy_", 1)[1])
-                except ValueError:
-                    return
-                listings = await db.get_role_listings(gid)
-                mv = MarketView(self.bot, gid, listings)
-                await mv._handle_market_buy(interaction, listing_id)
-                return
+        except Exception:
 
             if cid == "market_empty":
                 await interaction.response.defer(ephemeral=True)
@@ -860,16 +918,8 @@ class Shop(commands.Cog):
     # ── Persistent View Registration ──────────────────────────────────────────
 
     async def _register_persistent_views(self, guild: discord.Guild):
-        db = self.bot.db
-        items = await db.get_shop(guild.id)
-        shop_config = await db.get_shop_config(guild.id)
-        listings = await db.get_role_listings(guild.id)
-
-        shop_view = ShopPanelView(self.bot, guild.id, items, shop_config)
-        market_view = MarketView(self.bot, guild.id, listings)
-
+        shop_view = ShopPanelView(self.bot, guild.id)
         self.bot.add_view(shop_view)
-        self.bot.add_view(market_view)
 
     # ── Panel helpers ─────────────────────────────────────────────────────────
 
@@ -878,7 +928,7 @@ class Shop(commands.Cog):
         items: list[dict], shop_config: dict,
     ) -> discord.Message:
         """Send a brand-new shop panel (image + buttons)."""
-        view = ShopPanelView(self.bot, guild.id, items, shop_config)
+        view = ShopPanelView(self.bot, guild.id)
         self.bot.add_view(view)
 
         try:
@@ -922,38 +972,8 @@ class Shop(commands.Cog):
             log.warning("No permission to post shop panel in guild %s", guild.id)
 
     async def _refresh_market_panel(self, guild: discord.Guild):
-        """Edit or re-post market panel."""
-        db = self.bot.db
-        shop_config = await db.get_shop_config(guild.id)
-        listings = await db.get_role_listings(guild.id)
-
-        channel_id = shop_config.get("channel_id") or 0
-        market_msg_id = shop_config.get("market_message_id") or 0
-
-        if not channel_id:
-            return
-
-        channel = guild.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            return
-
-        embed = await _build_market_embed(guild, listings)
-        view = MarketView(self.bot, guild.id, listings)
-        self.bot.add_view(view)
-
-        if market_msg_id:
-            try:
-                msg = await channel.fetch_message(market_msg_id)
-                await msg.edit(embed=embed, view=view)
-                return
-            except (discord.NotFound, discord.HTTPException):
-                pass
-
-        try:
-            msg = await channel.send(embed=embed, view=view)
-            await db.set_shop_config(guild.id, market_message_id=msg.id)
-        except discord.Forbidden:
-            log.warning("No permission to post market panel in guild %s", guild.id)
+        """Edit or re-post market panel. (Now ephemeral, so this does nothing)"""
+        pass
 
     # ════════════════════════════════════════════════════════════════════════
     # /loja-admin group
@@ -1007,14 +1027,6 @@ class Shop(commands.Cog):
                 ephemeral=True,
             )
             return
-
-        listings = await db.get_role_listings(guild.id)
-        market_embed = await _build_market_embed(guild, listings)
-        market_view = MarketView(self.bot, guild.id, listings)
-        self.bot.add_view(market_view)
-
-        market_msg = await canal.send(embed=market_embed, view=market_view)
-        await db.set_shop_config(guild.id, market_message_id=market_msg.id)
 
         embed = discord.Embed(
             title="✅ Canal configurado",
