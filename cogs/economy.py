@@ -1145,6 +1145,65 @@ class Economy(commands.Cog):
         except discord.HTTPException:
             pass
 
+    # ── /banco-admin group ────────────────────────────────────────────────────
+
+    banco_admin = app_commands.Group(
+        name="banco-admin",
+        description="Administração da economia do servidor",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @banco_admin.command(name="resetar-todos", description="Zera o saldo de Sweet Coins de TODOS os membros do servidor")
+    async def resetar_todos(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        db = self.bot.db
+        await db.reset_all_coins(interaction.guild_id)
+        embed = discord.Embed(
+            title="⚠️ Saldo Resetado",
+            description=f"O saldo de {SWEET_COIN_EMOJI} **Sweet Coins** de **todos** os membros deste servidor foi zerado.",
+            color=WARNING_COLOR,
+        )
+        await interaction.followup.send(embed=embed)
+
+    @banco_admin.command(name="dar-todos", description="Dá uma quantidade de Sweet Coins para TODOS os membros do servidor")
+    @app_commands.describe(valor="Quantidade de coins a dar")
+    async def dar_todos(self, interaction: discord.Interaction, valor: int):
+        await interaction.response.defer(ephemeral=False)
+        if valor <= 0:
+            await interaction.followup.send("O valor deve ser maior que zero.", ephemeral=True)
+            return
+
+        db = self.bot.db
+        await db.give_coins_to_all(interaction.guild_id, valor)
+        embed = discord.Embed(
+            title="🎁 Moedas Distribuídas!",
+            description=f"Todos os membros do servidor receberam {SWEET_COIN_EMOJI} **{valor:,} Sweet Coins**!",
+            color=SUCCESS_COLOR,
+        )
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="leaderboard_coins", description="Top 10 membros mais ricos do servidor (Alias de /banco ranking)")
+    async def leaderboard_coins(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        top = await self.bot.db.get_leaderboard(interaction.guild_id)
+
+        embed = discord.Embed(
+            title=f"{SWEET_COIN_EMOJI} Ranking de Sweet Coins",
+            color=GOLD_COLOR,
+        )
+
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, row in enumerate(top):
+            member = interaction.guild.get_member(row["user_id"])
+            name = member.display_name if member else f"<@{row['user_id']}>"
+            prefix = medals[i] if i < 3 else f"`{i + 1}.`"
+            lines.append(
+                f"{prefix} **{name}** — {SWEET_COIN_EMOJI} {row['balance']:,}"
+            )
+
+        embed.description = "\n".join(lines) if lines else "Nenhum dado ainda."
+        await interaction.followup.send(embed=embed)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Economy(bot))

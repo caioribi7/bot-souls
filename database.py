@@ -381,6 +381,22 @@ class Database:
             )
             await db.commit()
 
+    async def reset_all_coins(self, guild_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE users SET balance=0 WHERE guild_id=?",
+                (guild_id,),
+            )
+            await db.commit()
+
+    async def give_coins_to_all(self, guild_id: int, amount: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE users SET balance=balance+? WHERE guild_id=?",
+                (amount, guild_id),
+            )
+            await db.commit()
+
     async def deduct_coins(self, user_id: int, guild_id: int, amount: int) -> bool:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
