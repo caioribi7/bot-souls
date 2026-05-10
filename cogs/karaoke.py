@@ -25,7 +25,7 @@ YTDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'auto',
     'cookiefile': 'cookies.txt',
-    'extractor_args': {'youtube': ['player_client=android']}
+    'extractor_args': {'youtube': ['player_client=tv,web']}
 }
 
 FFMPEG_OPTIONS = {
@@ -99,13 +99,10 @@ class Karaoke(commands.Cog):
             try:
                 data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{musica}", download=False))
             except Exception as e:
-                if "Sign in" in str(e) or "bot" in str(e).lower():
-                    await interaction.channel.send("⚠️ YouTube bloqueou a pesquisa. Buscando áudio alternativo (SoundCloud)...")
-                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{musica}", download=False))
-                else:
-                    raise e
+                await interaction.channel.send("⚠️ YouTube falhou (bloqueio ou erro de formato). Buscando áudio alternativo (SoundCloud)...")
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{musica}", download=False))
                     
-            if 'entries' in data:
+            if 'entries' in data and len(data['entries']) > 0:
                 data = data['entries'][0]
 
             url2 = data['url']
@@ -228,7 +225,7 @@ class Karaoke(commands.Cog):
             except Exception as e:
                 data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{beat_search}", download=False))
                 
-            if 'entries' in data:
+            if 'entries' in data and len(data['entries']) > 0:
                 data = data['entries'][0]
 
             source = discord.FFmpegPCMAudio(data['url'], **FFMPEG_OPTIONS)
