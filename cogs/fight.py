@@ -5,22 +5,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import BOT_COLOR, ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR, COIN_EMOJI
+from gifs_config import (
+    GIF_PUNCH, GIF_KICK, GIF_BLOCK, GIF_DODGE, GIF_HEAL, GIF_IDLE, GIF_WIN,
+    GIF_SPECIAL_1, GIF_SPECIAL_2, GIF_SPECIAL_3, GIF_SPECIAL_4, GIF_SPECIAL_5
+)
 
 SWEET_COIN_EMOJI = "🍬"
-
-# GIFs
-GIF_PUNCH = "https://media.giphy.com/media/l41Yf1B1gEokI5yXq/giphy.gif"
-GIF_KICK = "https://media.giphy.com/media/wLorCd0i4nQ6Y/giphy.gif"
-GIF_BLOCK = "https://media.giphy.com/media/l0HlJ7aAQyvjxM6B2/giphy.gif"
-GIF_DODGE = "https://media.giphy.com/media/19jsqzXQ7LvoA/giphy.gif"
-GIF_IDLE = "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyQ/giphy.gif"
-GIF_WIN = "https://media.giphy.com/media/1n8y2XhBAnSg4ZtEAM/giphy.gif"
-
-GIF_SPECIAL_1 = "https://media.giphy.com/media/13n51YnE8U436E/giphy.gif" # Explosão Estelar
-GIF_SPECIAL_2 = "https://media.giphy.com/media/wWT7Clw42FKXC/giphy.gif" # Corte Dimensional
-GIF_SPECIAL_3 = "https://media.giphy.com/media/xT1R9B7cGalGjF8X1m/giphy.gif" # Cura Divina
-GIF_SPECIAL_4 = "https://media.giphy.com/media/oTjoawKEq3wYD5fKEh/giphy.gif" # Fúria do Dragão
-GIF_SPECIAL_5 = "https://media.giphy.com/media/Mab0VG2Rqarpbbku33/giphy.gif" # Roubo de Alma
 
 SPECIALS = {
     1: {"name": "Explosão Estelar", "desc": "Dano muito alto, longo tempo de recarga.", "gif": GIF_SPECIAL_1},
@@ -126,6 +116,11 @@ class FightGame:
 
     def get_target(self):
         return self.p2 if self.turn == self.p1 else self.p1
+
+    def get_hp(self, player):
+        if player == self.p1:
+            return self.p1_hp
+        return self.p2_hp
 
     def get_current_build(self):
         return self.build1 if self.turn == self.p1 else self.build2
@@ -397,7 +392,7 @@ class FightView(discord.ui.View):
         self.game.heal_hp(self.game.turn, heal_amt)
         
         self.game.log = f"**{self.game.turn.display_name}** recuou para descansar e recuperou **{heal_amt}** de HP!"
-        self.game.last_gif = GIF_BLOCK # Reusing block gif for defensive posture
+        self.game.last_gif = GIF_HEAL
         self.game.pass_turn()
         await self.update_message(interaction)
 
