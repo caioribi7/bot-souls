@@ -1,0 +1,6 @@
+ffmpeg
+libsodium-dev
+gcc
+make
+g++
+nodejs
