@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import random
+import shutil
 import urllib.parse
 import os
 import discord
@@ -12,20 +13,32 @@ from config import BOT_COLOR, ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR, COIN_EM
 
 SWEET_COIN_EMOJI = "🍬"
 
-# ─── DIAGNÓSTICO / SOLUÇÃO ───────────────────────────────────────────────────────────────
-# Sem JS runtime: bestaudio/* são formatos DASH e falham.
-# Único formato que funciona é o 18 (mp4 progressivo, audio+video na mesma URL).
-# Porém: android_vr/android NÃO SUPORTAM cookies, então com cookiefile o yt-dlp
-# pula esses clientes e só sobram storyboards. Solução:
-#   - Estratégias primárias usam android_vr/android SEM cookies (funciona)
-#   - Estratégias secundárias usam web/tv_embedded COM cookies (fallback)
-# ────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ESTRATÉGIA DE EXTRAÇÃO
+#
+# Problema: SquareCloud usa IPs de datacenter que o YouTube bloqueia.
+#   - android_vr/android: não suportam cookiefile → youtube pede "sign in"
+#   - web + cookies: precisa de EJS (External JS Solver) para descriptografar DASH
+#
+# Solução: web client + cookies + Node.js + EJS solver (baixado do GitHub/npm).
+#   - remote_components: ['ejs:github'] → yt-dlp baixa e cacheia o solver automaticamente
+#   - js_runtimes: {'node': {'path': ...}} → usa o Node.js instalado
+#
+# Fallback: android_vr sem cookies (funciona em IPs residenciais/locais).
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Formato progressivo (sem DASH, sem JS): mp4 com áudio+vídeo na mesma URL
-_FORMAT_NO_JS = '18/best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best'
+def _find_node() -> str | None:
+    """Encontra o executável do Node.js no PATH."""
+    return shutil.which('node')
 
-def _make_ytdl(extra_opts: dict, use_cookies: bool = False) -> yt_dlp.YoutubeDL:
-    base = {
+
+def _make_ytdl_web(node_path: str | None) -> yt_dlp.YoutubeDL:
+    """
+    Estratégia principal: web client + cookies + EJS via Node.js.
+    Funciona em IPs de datacenter (SquareCloud) com cookies válidos.
+    """
+    opts = {
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'noplaylist': True,
         'nocheckcertificate': True,
         'ignoreerrors': False,
@@ -33,44 +46,50 @@ def _make_ytdl(extra_opts: dict, use_cookies: bool = False) -> yt_dlp.YoutubeDL:
         'quiet': True,
         'no_warnings': True,
         'default_search': 'auto',
-        'socket_timeout': 15,
+        'socket_timeout': 20,
+        'extractor_args': {'youtube': {'player_client': ['web']}},
+        'remote_components': ['ejs:github'],   # baixa solver automaticamente
     }
-    if use_cookies and os.path.isfile('cookies.txt'):
-        base['cookiefile'] = 'cookies.txt'
-    base.update(extra_opts)
-    return yt_dlp.YoutubeDL(base)
+    if os.path.isfile('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+    if node_path:
+        opts['js_runtimes'] = {'node': {'path': node_path}}
+    return yt_dlp.YoutubeDL(opts)
 
 
-# ── Estratégia 1: android_vr SEM cookies (formato 18, testado e funcionando) ──
-STRATEGY_ANDROID_VR = _make_ytdl({
-    'format': _FORMAT_NO_JS,
-    'extractor_args': {'youtube': {'player_client': ['android_vr']}},
-}, use_cookies=False)
+def _make_ytdl_android_vr() -> yt_dlp.YoutubeDL:
+    """
+    Fallback: android_vr sem cookies — formato 18 (progressivo, sem DASH, sem JS).
+    Funciona em IPs residenciais/locais. Em datacenter pode pedir "sign in".
+    """
+    return yt_dlp.YoutubeDL({
+        'format': '18/best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best',
+        'noplaylist': True,
+        'nocheckcertificate': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'quiet': True,
+        'no_warnings': True,
+        'default_search': 'auto',
+        'socket_timeout': 20,
+        'extractor_args': {'youtube': {'player_client': ['android_vr', 'android']}},
+        # SEM cookiefile — android_vr não suporta cookies
+    })
 
-# ── Estratégia 2: android SEM cookies (fallback do android_vr) ────────────
-STRATEGY_ANDROID = _make_ytdl({
-    'format': _FORMAT_NO_JS,
-    'extractor_args': {'youtube': {'player_client': ['android_vr', 'android']}},
-}, use_cookies=False)
 
-# ── Estratégia 3: tv_embedded COM cookies (usa JS quando disponível) ───────
-STRATEGY_TV = _make_ytdl({
-    'format': _FORMAT_NO_JS,
-    'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
-}, use_cookies=True)
+# Instâncias globais (criadas uma vez, não por requisição)
+_NODE_PATH = _find_node()
+print(f"[Karaoke] Node.js encontrado em: {_NODE_PATH or 'NÃO ENCONTRADO'}")
 
-# ── Estratégia 4: fallback absoluto sem qualquer restrição ─────────────
-STRATEGY_ANY = _make_ytdl({
-    'format': 'best[ext=mp4]/best',
-    'extractor_args': {'youtube': {'player_client': ['android_vr', 'tv_embedded', 'android']}},
-}, use_cookies=False)
+YTDL_WEB      = _make_ytdl_web(_NODE_PATH)
+YTDL_ANDROID  = _make_ytdl_android_vr()
 
 FFMPEG_OPTIONS = {
     'before_options': (
         '-reconnect 1 '
         '-reconnect_streamed 1 '
         '-reconnect_delay_max 5 '
-        '-timeout 15000000'
+        '-timeout 20000000'
     ),
     'options': '-vn -bufsize 64k'
 }
@@ -78,44 +97,40 @@ FFMPEG_OPTIONS = {
 
 async def extrair_url_audio(loop: asyncio.AbstractEventLoop, query: str) -> tuple[str, str]:
     """
-    Tenta extrair a URL de áudio usando múltiplas estratégias.
-    Retorna (url_do_stream, titulo).
-    Levanta Exception se nenhuma estratégia funcionar.
+    Extrai URL de stream de áudio para a query dada.
+    Retorna (url, titulo). Levanta Exception se tudo falhar.
     """
     estrategias = [
-        ("Android VR (sem cookies)",  STRATEGY_ANDROID_VR, query),
-        ("Android (sem cookies)",     STRATEGY_ANDROID,    query),
-        ("TV Embedded (com cookies)", STRATEGY_TV,         query),
-        ("Any (fallback absoluto)",   STRATEGY_ANY,        query),
+        ("Web+EJS (datacenter)",  YTDL_WEB),
+        ("AndroidVR (local/residencial)", YTDL_ANDROID),
     ]
 
     ultimo_erro = None
-    for nome, ytdl_inst, q in estrategias:
+    for nome, inst in estrategias:
         try:
-            print(f"[Karaoke] Tentando estratégia: {nome} | query: {q}")
+            print(f"[Karaoke] Tentando: {nome} | query: {query}")
             data = await loop.run_in_executor(
-                None, lambda inst=ytdl_inst, qr=q: inst.extract_info(qr, download=False)
+                None, lambda i=inst, q=query: i.extract_info(q, download=False)
             )
             if not data:
-                raise ValueError("Nenhum dado retornado")
+                raise ValueError("Sem dados retornados")
 
-            # Desembrulha playlists / listas de busca
             if 'entries' in data:
-                entries = [e for e in data['entries'] if e]
+                entries = [e for e in data.get('entries', []) if e]
                 if not entries:
                     raise ValueError("Lista de resultados vazia")
                 data = entries[0]
 
-            url = data.get('url') or data.get('webpage_url')
+            url = data.get('url')
             if not url:
-                raise ValueError("URL de stream não encontrada nos dados")
+                raise ValueError("URL de stream não encontrada")
 
-            title = data.get('title', q)
-            print(f"[Karaoke] ✅ Sucesso com '{nome}': {title}")
+            title = data.get('title', query)
+            print(f"[Karaoke] ✅ {nome} → '{title}'")
             return url, title
 
         except Exception as e:
-            print(f"[Karaoke] ❌ Falhou '{nome}': {e}")
+            print(f"[Karaoke] ❌ {nome} falhou: {e}")
             ultimo_erro = e
             continue
 
@@ -150,7 +165,7 @@ class Karaoke(commands.Cog):
         return None
 
     async def _conectar_voz(self, interaction: discord.Interaction) -> discord.VoiceClient | None:
-        """Conecta ao canal de voz do usuário e retorna o VoiceClient, ou None em caso de falha."""
+        """Conecta ao canal de voz do usuário. Retorna VoiceClient ou None."""
         if not interaction.user.voice:
             await interaction.followup.send("❌ Você precisa estar em um canal de voz primeiro!", ephemeral=True)
             return None
@@ -172,7 +187,7 @@ class Karaoke(commands.Cog):
 
         return vc
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     karaoke_group = app_commands.Group(name="karaoke", description="Sistema de Karaokê")
 
     @karaoke_group.command(name="vplay", description="Entra no canal de voz e toca uma música/karaokê do YouTube")
@@ -187,7 +202,6 @@ class Karaoke(commands.Cog):
         status_msg = await interaction.followup.send(f"🔍 Procurando por **{musica}**...")
 
         loop = asyncio.get_event_loop()
-        # Prepara a query (URL direta ou busca)
         query = musica if musica.startswith("http") else f"ytsearch:{musica}"
 
         try:
@@ -235,7 +249,7 @@ class Karaoke(commands.Cog):
             embed = discord.Embed(title=f"🎤 Letra: {musica.title()}", description=lyrics, color=BOT_COLOR)
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("❌ Não encontrei a letra. Tente ser mais específico, ex: `Artista - Música`.")
+            await interaction.followup.send("❌ Não encontrei a letra. Tente: `Artista - Música`.")
 
     @karaoke_group.command(name="minigame", description="Complete o trecho da música e ganhe Sweet Coins!")
     async def minigame(self, interaction: discord.Interaction):
@@ -272,9 +286,9 @@ class Karaoke(commands.Cog):
                 await interaction.channel.send(f"⏳ Tempo esgotado! Ninguém acertou. A resposta era: **{song['resposta']}**.")
                 return
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # Batalha de Rap
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     @app_commands.command(name="batalha_rap", description="Desafie alguém para uma Batalha de Rap no canal de voz!")
     @app_commands.describe(adversario="O usuário que você vai desafiar")
     async def batalha_rap(self, interaction: discord.Interaction, adversario: discord.Member):
@@ -304,7 +318,6 @@ class Karaoke(commands.Cog):
         msg = await interaction.followup.send(embed=embed, wait=True)
 
         loop = asyncio.get_event_loop()
-        # Beats genéricos para tentar em sequência
         beat_queries = [
             "ytsearch:rap freestyle beat instrumental no copyright",
             "ytsearch:hip hop beat instrumental 2024",
@@ -331,7 +344,6 @@ class Karaoke(commands.Cog):
             source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
             vc.play(source)
 
-            # Round 1
             embed.description = (
                 f"🎵 Beat: **{beat_title}**\n\n"
                 f"**ROUND 1** — É a vez de {interaction.user.mention} rimar!\n"
@@ -340,7 +352,6 @@ class Karaoke(commands.Cog):
             await msg.edit(embed=embed)
             await asyncio.sleep(30)
 
-            # Round 2
             embed.description = (
                 f"🎵 Beat: **{beat_title}**\n\n"
                 f"**ROUND 2** — Agora é a vez de {adversario.mention} mandar a rima!\n"
