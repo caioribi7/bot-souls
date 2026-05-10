@@ -16,73 +16,15 @@ SWEET_COIN_EMOJI = "🍬"
 # ─────────────────────────────────────────────────────────────────────────────
 # ESTRATÉGIA DE EXTRAÇÃO
 #
-# Problema: SquareCloud usa IPs de datacenter que o YouTube bloqueia.
-#   - android_vr/android: não suportam cookiefile → youtube pede "sign in"
-#   - web + cookies: precisa de EJS (External JS Solver) para descriptografar DASH
+# Contexto: SquareCloud usa IPs de datacenter bloqueados pelo YouTube.
+#   - android_vr sem cookies → "Sign in to confirm you're not a bot"
+#   - web + cookies + EJS → depende de download do GitHub (instável em datacenter)
+#   - Invidious → instâncias públicas offline/bloqueadas
 #
-# Solução: web client + cookies + Node.js + EJS solver (baixado do GitHub/npm).
-#   - remote_components: ['ejs:github'] → yt-dlp baixa e cacheia o solver automaticamente
-#   - js_runtimes: {'node': {'path': ...}} → usa o Node.js instalado
-#
-# Fallback: android_vr sem cookies (funciona em IPs residenciais/locais).
+# Solução final (testada e validada):
+#   1. pytubefix — usa InnerTube API com cliente iOS/tvOS, bypassa bot detection
+#   2. yt-dlp android_vr sem cookies — funciona em IPs residenciais / localmente
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _find_node() -> str | None:
-    """Encontra o executável do Node.js no PATH."""
-    return shutil.which('node')
-
-
-def _make_ytdl_web(node_path: str | None) -> yt_dlp.YoutubeDL:
-    """
-    Estratégia principal: web client + cookies + EJS via Node.js.
-    Funciona em IPs de datacenter (SquareCloud) com cookies válidos.
-    """
-    opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'noplaylist': True,
-        'nocheckcertificate': True,
-        'ignoreerrors': False,
-        'logtostderr': False,
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'auto',
-        'socket_timeout': 20,
-        'extractor_args': {'youtube': {'player_client': ['web']}},
-        'remote_components': ['ejs:github'],   # baixa solver automaticamente
-    }
-    if os.path.isfile('cookies.txt'):
-        opts['cookiefile'] = 'cookies.txt'
-    if node_path:
-        opts['js_runtimes'] = {'node': {'path': node_path}}
-    return yt_dlp.YoutubeDL(opts)
-
-
-def _make_ytdl_android_vr() -> yt_dlp.YoutubeDL:
-    """
-    Fallback: android_vr sem cookies — formato 18 (progressivo, sem DASH, sem JS).
-    Funciona em IPs residenciais/locais. Em datacenter pode pedir "sign in".
-    """
-    return yt_dlp.YoutubeDL({
-        'format': '18/best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best',
-        'noplaylist': True,
-        'nocheckcertificate': True,
-        'ignoreerrors': False,
-        'logtostderr': False,
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'auto',
-        'socket_timeout': 20,
-        'extractor_args': {'youtube': {'player_client': ['android_vr', 'android']}},
-        # SEM cookiefile — android_vr não suporta cookies
-    })
-
-
-# Instâncias globais (criadas uma vez, não por requisição)
-_NODE_PATH = _find_node()
-print(f"[Karaoke] Node.js encontrado em: {_NODE_PATH or 'NÃO ENCONTRADO'}")
-
-YTDL_WEB      = _make_ytdl_web(_NODE_PATH)
-YTDL_ANDROID  = _make_ytdl_android_vr()
 
 FFMPEG_OPTIONS = {
     'before_options': (
@@ -94,45 +36,92 @@ FFMPEG_OPTIONS = {
     'options': '-vn -bufsize 64k'
 }
 
+# ── yt-dlp: fallback android_vr (sem cookies, sem DASH, sem JS) ──────────────
+_YTDL_FALLBACK = yt_dlp.YoutubeDL({
+    'format': '18/best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best',
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'socket_timeout': 20,
+    'extractor_args': {'youtube': {'player_client': ['android_vr', 'android']}},
+    # SEM cookiefile — android_vr não suporta cookies
+})
+
+
+async def _extrair_pytubefix(query: str, loop: asyncio.AbstractEventLoop) -> tuple[str, str]:
+    """
+    Extrai URL de áudio via pytubefix (InnerTube API, cliente tvOS).
+    Funciona em IPs de datacenter sem autenticação.
+    """
+    from pytubefix import Search, YouTube
+
+    def _sync():
+        # Busca o vídeo
+        if query.startswith("http"):
+            yt = YouTube(query, use_oauth=False, allow_oauth_cache=False)
+        else:
+            results = Search(query).results
+            if not results:
+                raise ValueError("Nenhum resultado encontrado no YouTube")
+            yt = results[0]
+
+        # Tenta stream de áudio puro primeiro
+        stream = yt.streams.get_audio_only()
+        if not stream:
+            # Fallback: melhor formato progressivo (video+audio)
+            stream = yt.streams.filter(progressive=True).order_by('resolution').last()
+        if not stream:
+            raise ValueError(f"Nenhum stream disponível para: {yt.title}")
+
+        return stream.url, yt.title
+
+    return await loop.run_in_executor(None, _sync)
+
+
+async def _extrair_ytdlp_fallback(query: str, loop: asyncio.AbstractEventLoop) -> tuple[str, str]:
+    """
+    Fallback via yt-dlp com android_vr (funciona em IPs residenciais/locais).
+    """
+    def _sync(q=query):
+        data = _YTDL_FALLBACK.extract_info(q, download=False)
+        if not data:
+            raise ValueError("Sem dados retornados")
+        if 'entries' in data:
+            entries = [e for e in data.get('entries', []) if e]
+            if not entries:
+                raise ValueError("Lista vazia")
+            data = entries[0]
+        url = data.get('url')
+        if not url:
+            raise ValueError("URL de stream não encontrada")
+        return url, data.get('title', query)
+
+    return await loop.run_in_executor(None, _sync)
+
 
 async def extrair_url_audio(loop: asyncio.AbstractEventLoop, query: str) -> tuple[str, str]:
     """
-    Extrai URL de stream de áudio para a query dada.
-    Retorna (url, titulo). Levanta Exception se tudo falhar.
+    Tenta extrair URL de áudio usando múltiplas estratégias em ordem.
+    Retorna (url, titulo). Levanta Exception se todas falharem.
     """
     estrategias = [
-        ("Web+EJS (datacenter)",  YTDL_WEB),
-        ("AndroidVR (local/residencial)", YTDL_ANDROID),
+        ("pytubefix (InnerTube/tvOS)", lambda q=query: _extrair_pytubefix(q, loop)),
+        ("yt-dlp android_vr (fallback)", lambda q=query: _extrair_ytdlp_fallback(q, loop)),
     ]
 
     ultimo_erro = None
-    for nome, inst in estrategias:
+    for nome, func in estrategias:
         try:
-            print(f"[Karaoke] Tentando: {nome} | query: {query}")
-            data = await loop.run_in_executor(
-                None, lambda i=inst, q=query: i.extract_info(q, download=False)
-            )
-            if not data:
-                raise ValueError("Sem dados retornados")
-
-            if 'entries' in data:
-                entries = [e for e in data.get('entries', []) if e]
-                if not entries:
-                    raise ValueError("Lista de resultados vazia")
-                data = entries[0]
-
-            url = data.get('url')
-            if not url:
-                raise ValueError("URL de stream não encontrada")
-
-            title = data.get('title', query)
+            print(f"[Karaoke] Tentando: {nome}")
+            url, title = await func()
             print(f"[Karaoke] ✅ {nome} → '{title}'")
             return url, title
-
         except Exception as e:
             print(f"[Karaoke] ❌ {nome} falhou: {e}")
             ultimo_erro = e
-            continue
 
     raise Exception(f"Todas as estratégias falharam. Último erro: {ultimo_erro}")
 
@@ -202,7 +191,7 @@ class Karaoke(commands.Cog):
         status_msg = await interaction.followup.send(f"🔍 Procurando por **{musica}**...")
 
         loop = asyncio.get_event_loop()
-        query = musica if musica.startswith("http") else f"ytsearch:{musica}"
+        query = musica if musica.startswith("http") else musica
 
         try:
             stream_url, title = await extrair_url_audio(loop, query)
@@ -319,9 +308,9 @@ class Karaoke(commands.Cog):
 
         loop = asyncio.get_event_loop()
         beat_queries = [
-            "ytsearch:rap freestyle beat instrumental no copyright",
-            "ytsearch:hip hop beat instrumental 2024",
-            "ytsearch:trap beat instrumental",
+            "rap freestyle beat instrumental no copyright",
+            "hip hop beat instrumental 2024",
+            "trap beat instrumental",
         ]
 
         stream_url = None
