@@ -23,8 +23,7 @@ YTDL_OPTIONS = {
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0'
+    'default_search': 'auto'
 }
 
 FFMPEG_OPTIONS = {
@@ -49,19 +48,16 @@ class Karaoke(commands.Cog):
         self.rap_battles = {}
 
     async def get_lyrics(self, artist, title):
-        # A simple scraper for Vagalume
-        url = f"https://www.vagalume.com.br/{urllib.parse.quote(artist)}/{urllib.parse.quote(title)}.html"
+        url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(artist)}/{urllib.parse.quote(title)}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=5) as resp:
                     if resp.status == 200:
-                        html = await resp.text()
-                        soup = BeautifulSoup(html, 'html.parser')
-                        lyrics_div = soup.find('div', id='lyrics')
-                        if lyrics_div:
-                            text = lyrics_div.get_text(separator='\n').strip()
-                            return text
-        except:
+                        data = await resp.json()
+                        if 'lyrics' in data:
+                            return data['lyrics'].strip()
+        except Exception as e:
+            print(f"Erro na letra: {e}")
             pass
         return None
 
