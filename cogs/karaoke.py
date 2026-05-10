@@ -75,13 +75,17 @@ class Karaoke(commands.Cog):
         channel = interaction.user.voice.channel
 
         try:
-            voice_client = await channel.connect()
-        except discord.ClientException:
-            voice_client = interaction.guild.voice_client
-            if voice_client.channel != channel:
-                await voice_client.move_to(channel)
+            try:
+                voice_client = await channel.connect()
+            except discord.ClientException:
+                voice_client = interaction.guild.voice_client
+                if voice_client and voice_client.channel != channel:
+                    await voice_client.move_to(channel)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Não consegui conectar ao canal de voz. Detalhe do erro: {e}", ephemeral=True)
+            return
 
-        if voice_client.is_playing():
+        if voice_client and voice_client.is_playing():
             voice_client.stop()
 
         await interaction.followup.send(f"🔍 Procurando por **{musica}**...")
@@ -183,13 +187,17 @@ class Karaoke(commands.Cog):
 
         channel = interaction.user.voice.channel
         try:
-            voice_client = await channel.connect()
-        except discord.ClientException:
-            voice_client = interaction.guild.voice_client
-            if voice_client.channel != channel:
-                await voice_client.move_to(channel)
+            try:
+                voice_client = await channel.connect()
+            except discord.ClientException:
+                voice_client = interaction.guild.voice_client
+                if voice_client and voice_client.channel != channel:
+                    await voice_client.move_to(channel)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Não consegui conectar ao canal de voz. Detalhe do erro: {e}", ephemeral=True)
+            return
 
-        if voice_client.is_playing():
+        if voice_client and voice_client.is_playing():
             voice_client.stop()
 
         embed = discord.Embed(
