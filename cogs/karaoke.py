@@ -94,7 +94,15 @@ class Karaoke(commands.Cog):
 
         loop = asyncio.get_event_loop()
         try:
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{musica}", download=False))
+            try:
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{musica}", download=False))
+            except Exception as e:
+                if "Sign in" in str(e) or "bot" in str(e).lower():
+                    await interaction.channel.send("⚠️ YouTube bloqueou a pesquisa. Buscando áudio alternativo (SoundCloud)...")
+                    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{musica}", download=False))
+                else:
+                    raise e
+                    
             if 'entries' in data:
                 data = data['entries'][0]
 
@@ -211,9 +219,13 @@ class Karaoke(commands.Cog):
 
         loop = asyncio.get_event_loop()
         try:
-            # Pegando um beat famoso genérico no YouTube
+            # Pegando um beat famoso genérico no YouTube ou SoundCloud
             beat_search = "rap freestyle beat instrumental"
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{beat_search}", download=False))
+            try:
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{beat_search}", download=False))
+            except Exception as e:
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{beat_search}", download=False))
+                
             if 'entries' in data:
                 data = data['entries'][0]
 
