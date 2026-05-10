@@ -4,6 +4,9 @@ import random
 import shutil
 import urllib.parse
 import os
+import uuid
+from typing import Literal
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -13,34 +16,11 @@ from config import BOT_COLOR, ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR, COIN_EM
 
 SWEET_COIN_EMOJI = "🍬"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SOLUÇÃO DEFINITIVA
-#
-# Contexto: SquareCloud usa IPs de datacenter bloqueados pelo YouTube.
-#
-# O que funciona:
-#   yt-dlp + web client + cookies.txt + Node.js (js_runtimes) +
-#   EJS solver (cache local em yt_cache/ — commitado no repositório)
-#
-# A chave: cache_dir aponta para ./yt_cache que contém o script EJS
-#   pré-baixado. Assim não há download do GitHub em runtime → confiável.
-#
-# Fallback: android_vr sem cookies (para testes locais em IPs residenciais).
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Caminhos
-_CACHE_DIR  = os.path.abspath('yt_cache')   # contém challenge-solver/lib.json
+_CACHE_DIR  = os.path.abspath('yt_cache')
 _COOKIE_FILE = 'cookies.txt'
 _NODE_PATH  = shutil.which('node') or shutil.which('nodejs')
 
-print(f"[Karaoke] Node.js: {_NODE_PATH or 'NÃO ENCONTRADO'}")
-print(f"[Karaoke] Cache EJS: {os.path.join(_CACHE_DIR, 'challenge-solver', 'lib.json')} "
-      f"→ {'✅' if os.path.isfile(os.path.join(_CACHE_DIR, 'challenge-solver', 'lib.json')) else '❌ AUSENTE'}")
-
-
-import uuid
-
-def _get_ytdl_opts(is_web: bool, outtmpl: str) -> dict:
+def _get_ytdl_opts(is_web: bool, outtmpl: str | None = None) -> dict:
     opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'noplaylist': True,
@@ -50,8 +30,10 @@ def _get_ytdl_opts(is_web: bool, outtmpl: str) -> dict:
         'no_warnings': True,
         'default_search': 'auto',
         'socket_timeout': 20,
-        'outtmpl': outtmpl,
     }
+    
+    if outtmpl:
+        opts['outtmpl'] = outtmpl
     
     if is_web:
         opts.update({
@@ -71,50 +53,60 @@ def _get_ytdl_opts(is_web: bool, outtmpl: str) -> dict:
     
     return opts
 
+async def obter_info_audio(loop: asyncio.AbstractEventLoop, query: str) -> tuple[str, str]:
+    """ Busca apenas URL e Titulo (rápido, sem baixar) """
+    estrategias = [
+        ("Web+EJS+cookies", True),
+        ("AndroidVR sem cookies", False),
+    ]
+    erros = []
+    for nome, is_web in estrategias:
+        try:
+            opts = _get_ytdl_opts(is_web, None)
+            def _extract():
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    data = ydl.extract_info(query, download=False)
+                    if not data: raise ValueError("Sem dados")
+                    if 'entries' in data:
+                        entries = [e for e in data.get('entries', []) if e]
+                        if not entries: raise ValueError("Vazio")
+                        data = entries[0]
+                    url = data.get('webpage_url') or data.get('original_url') or data.get('url')
+                    return url, data.get('title', query)
+            return await loop.run_in_executor(None, _extract)
+        except Exception as e:
+            erros.append(str(e))
+    raise Exception("Falha na busca: " + " | ".join(erros))
+
 async def baixar_audio_local(loop: asyncio.AbstractEventLoop, query: str) -> tuple[str, str]:
-    """
-    Baixa o áudio localmente para evitar erro 403 do FFmpeg (falta de cookies).
-    Retorna (caminho_do_arquivo, titulo).
-    """
+    """ Baixa o áudio localmente e retorna filepath e título. """
     file_id = str(uuid.uuid4())[:8]
     outtmpl = f"karaoke_{file_id}_%(id)s.%(ext)s"
     
     estrategias = [
-        ("Web+EJS+cookies (datacenter)", True),
-        ("AndroidVR sem cookies (local)", False),
+        ("Web+EJS+cookies", True),
+        ("AndroidVR sem cookies", False),
     ]
 
-    erros: list[str] = []
     for nome, is_web in estrategias:
         try:
-            print(f"[Karaoke] Baixando via: {nome}")
             opts = _get_ytdl_opts(is_web, outtmpl)
-            
             def _download():
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     data = ydl.extract_info(query, download=True)
-                    if not data:
-                        raise ValueError("Sem dados retornados")
+                    if not data: raise ValueError("Sem dados")
                     if 'entries' in data:
                         entries = [e for e in data.get('entries', []) if e]
-                        if not entries:
-                            raise ValueError("Lista de resultados vazia")
+                        if not entries: raise ValueError("Vazio")
                         data = entries[0]
                     return ydl.prepare_filename(data), data.get('title', query)
 
             filepath, title = await loop.run_in_executor(None, _download)
             if filepath and os.path.isfile(filepath):
-                print(f"[Karaoke] ✅ Download concluído: {filepath}")
                 return filepath, title
-            else:
-                raise ValueError("Arquivo não foi salvo")
-                
-        except Exception as e:
-            msg = str(e)
-            print(f"[Karaoke] ❌ {nome} falhou: {msg}")
-            erros.append(f"**{nome}**: {msg}")
-
-    raise Exception("Todas as estratégias falharam:\n" + "\n".join(erros))
+        except Exception:
+            continue
+    raise Exception("Todas as estratégias de download falharam.")
 
 
 MINIGAME_SONGS = [
@@ -129,19 +121,9 @@ MINIGAME_SONGS = [
 class Karaoke(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-    async def get_lyrics(self, query: str) -> str | None:
-        url = f"https://lrclib.net/api/search?q={urllib.parse.quote(query)}"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data:
-                            return data[0].get('plainLyrics') or data[0].get('syncedLyrics')
-        except Exception as e:
-            print(f"[Karaoke] Erro na letra: {e}")
-        return None
+        self.queues = {}      # guild_id -> list of dicts
+        self.current = {}     # guild_id -> dict
+        self.loop_modes = {}  # guild_id -> 'off', 'track', 'queue'
 
     async def _conectar_voz(self, interaction: discord.Interaction) -> discord.VoiceClient | None:
         if not interaction.user.voice:
@@ -156,74 +138,224 @@ class Karaoke(commands.Cog):
                 if vc and vc.channel != channel:
                     await vc.move_to(channel)
         except Exception as e:
-            await interaction.followup.send(f"❌ Não consegui conectar ao canal de voz: `{e}`", ephemeral=True)
+            await interaction.followup.send(f"❌ Não consegui conectar ao canal: `{e}`", ephemeral=True)
             return None
-        if vc and vc.is_playing():
-            vc.stop()
         return vc
 
-    # ─────────────────────────────────────────────────────────────────────────
-    karaoke_group = app_commands.Group(name="karaoke", description="Sistema de Karaokê")
+    def _after_play(self, err, guild: discord.Guild, text_channel: discord.TextChannel, filepath: str):
+        if err:
+            print(f"[Karaoke] Erro no player: {err}")
+        
+        loop_mode = self.loop_modes.get(guild.id, 'off')
+        
+        # Só deleta o arquivo se NÃO for loop da mesma música
+        if loop_mode != 'track':
+            if filepath and os.path.isfile(filepath):
+                try: os.remove(filepath)
+                except: pass
+            
+            # Se for loop queue, limpa o filepath para forçar download novamente e economizar espaço
+            current = self.current.get(guild.id)
+            if current:
+                current['filepath'] = None
 
-    @karaoke_group.command(name="vplay", description="Entra no canal de voz e toca uma música/karaokê do YouTube")
-    @app_commands.describe(musica="Nome ou URL da música que deseja tocar")
+        # Chama a próxima música
+        asyncio.run_coroutine_threadsafe(self._play_next(guild, text_channel), self.bot.loop)
+
+    async def _play_next(self, guild: discord.Guild, text_channel: discord.TextChannel):
+        vc = guild.voice_client
+        if not vc or not vc.is_connected():
+            return
+            
+        queue = self.queues.setdefault(guild.id, [])
+        loop_mode = self.loop_modes.setdefault(guild.id, 'off')
+        current = self.current.get(guild.id)
+        
+        next_song = None
+        
+        if loop_mode == 'track' and current:
+            next_song = current
+        else:
+            if loop_mode == 'queue' and current:
+                queue.append(current)
+                
+            if queue:
+                next_song = queue.pop(0)
+                
+        if not next_song:
+            self.current.pop(guild.id, None)
+            embed = discord.Embed(title="⏹️ Fila concluída", description="As músicas acabaram. Adicione mais com `/karaoke vplay`!", color=BOT_COLOR)
+            await text_channel.send(embed=embed)
+            return
+            
+        self.current[guild.id] = next_song
+        
+        try:
+            # Baixa o áudio apenas quando for tocar (economiza espaço)
+            if not next_song.get('filepath') or not os.path.isfile(next_song['filepath']):
+                status = await text_channel.send(f"⬇️ Preparando: **{next_song['title']}**...")
+                fp, title = await baixar_audio_local(self.bot.loop, next_song['url'])
+                next_song['filepath'] = fp
+                next_song['title'] = title
+                await status.delete()
+                
+            fp = next_song['filepath']
+            source = discord.FFmpegPCMAudio(fp, options="-vn")
+            vc.play(source, after=lambda err: self._after_play(err, guild, text_channel, fp))
+            
+            embed = discord.Embed(
+                title="🎶 Tocando Agora",
+                description=f"**{next_song['title']}**\nAdicionado por: {next_song['user'].mention}",
+                color=BOT_COLOR
+            )
+            await text_channel.send(embed=embed)
+        except Exception as e:
+            await text_channel.send(f"❌ Erro ao tocar **{next_song.get('title', 'música')}**: `{e}`")
+            # Tenta a próxima se essa falhar
+            await self._play_next(guild, text_channel)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    karaoke_group = app_commands.Group(name="karaoke", description="Sistema de Karaokê e Música")
+
+    @karaoke_group.command(name="vplay", description="Toca uma música ou adiciona à fila")
+    @app_commands.describe(musica="Nome ou URL da música")
     async def tocar(self, interaction: discord.Interaction, musica: str):
         await interaction.response.defer()
         vc = await self._conectar_voz(interaction)
-        if vc is None:
-            return
+        if vc is None: return
 
-        status_msg = await interaction.followup.send(f"🔍 Procurando por **{musica}**...")
-        loop = asyncio.get_event_loop()
-        query = musica if musica.startswith("http") else f"ytsearch:{musica}"
+        guild_id = interaction.guild_id
+        self.queues.setdefault(guild_id, [])
+        self.loop_modes.setdefault(guild_id, 'off')
 
+        status_msg = await interaction.followup.send(f"🔍 Buscando por **{musica}**...")
         try:
-            filepath, title = await baixar_audio_local(loop, query)
+            query = musica if musica.startswith("http") else f"ytsearch:{musica}"
+            url, title = await obter_info_audio(self.bot.loop, query)
         except Exception as e:
-            await status_msg.edit(content=f"❌ Não encontrei áudio para **{musica}**.\n> {e}")
-            if vc.is_connected():
-                await vc.disconnect()
+            await status_msg.edit(content=f"❌ Erro ao buscar **{musica}**:\n> {e}")
             return
 
-        def _depois_de_tocar(err, fp):
-            if err:
-                print(f"[Karaoke] Player error: {err}")
-            if os.path.isfile(fp):
-                try:
-                    os.remove(fp)
-                except:
-                    pass
+        item = {
+            'url': url,
+            'title': title,
+            'user': interaction.user,
+            'filepath': None
+        }
 
-        try:
-            source = discord.FFmpegPCMAudio(filepath, options="-vn")
-            vc.play(source, after=lambda err: _depois_de_tocar(err, filepath))
-
+        if vc.is_playing() or vc.is_paused():
+            self.queues[guild_id].append(item)
             embed = discord.Embed(
-                title="🎶 Karaokê Iniciado",
-                description=f"Tocando agora: **{title}**",
-                color=BOT_COLOR
+                title="✅ Adicionado à Fila",
+                description=f"**{title}**",
+                color=SUCCESS_COLOR
             )
-            embed.set_footer(text="Use /karaoke parar para encerrar.")
+            embed.set_footer(text=f"Posição na fila: {len(self.queues[guild_id])}")
             await status_msg.edit(content=None, embed=embed)
-        except Exception as e:
-            await status_msg.edit(content=f"❌ Erro ao iniciar reprodução: `{e}`")
-            if vc.is_connected():
-                await vc.disconnect()
+        else:
+            self.queues[guild_id].append(item)
+            await status_msg.delete()
+            await self._play_next(interaction.guild, interaction.channel)
 
-    @karaoke_group.command(name="parar", description="Para a música e sai do canal de voz")
+    @karaoke_group.command(name="skip", description="Pula a música atual")
+    async def skip(self, interaction: discord.Interaction):
+        vc = interaction.guild.voice_client
+        if vc and vc.is_playing():
+            vc.stop() # Isso aciona o after_play que toca a próxima
+            await interaction.response.send_message("⏭️ Música pulada!", ephemeral=False)
+        else:
+            await interaction.response.send_message("Não há nada tocando para pular.", ephemeral=True)
+
+    @karaoke_group.command(name="pause", description="Pausa a música atual")
+    async def pause(self, interaction: discord.Interaction):
+        vc = interaction.guild.voice_client
+        if vc and vc.is_playing():
+            vc.pause()
+            await interaction.response.send_message("⏸️ Música pausada!")
+        else:
+            await interaction.response.send_message("Não há nada tocando para pausar.", ephemeral=True)
+
+    @karaoke_group.command(name="resume", description="Despausa a música atual")
+    async def resume(self, interaction: discord.Interaction):
+        vc = interaction.guild.voice_client
+        if vc and vc.is_paused():
+            vc.resume()
+            await interaction.response.send_message("▶️ Música despausada!")
+        else:
+            await interaction.response.send_message("A música não está pausada.", ephemeral=True)
+
+    @karaoke_group.command(name="fila", description="Mostra a fila de músicas")
+    async def fila(self, interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        queue = self.queues.get(guild_id, [])
+        current = self.current.get(guild_id)
+        
+        if not current and not queue:
+            await interaction.response.send_message("A fila está vazia.", ephemeral=True)
+            return
+            
+        desc = ""
+        if current:
+            desc += f"**Tocando agora:**\n🎶 {current['title']} ({current['user'].mention})\n\n"
+            
+        if queue:
+            desc += "**Próximas:**\n"
+            for i, item in enumerate(queue[:10]):
+                desc += f"`{i+1}.` {item['title']} ({item['user'].mention})\n"
+            if len(queue) > 10:
+                desc += f"...e mais {len(queue) - 10} músicas."
+                
+        embed = discord.Embed(title="📜 Fila de Reprodução", description=desc, color=BOT_COLOR)
+        mode = self.loop_modes.get(guild_id, 'off')
+        if mode != 'off':
+            embed.set_footer(text=f"🔁 Loop ativado: {mode}")
+            
+        await interaction.response.send_message(embed=embed)
+
+    @karaoke_group.command(name="loop", description="Muda o modo de repetição")
+    @app_commands.describe(modo="Qual tipo de loop deseja ativar")
+    async def loop(self, interaction: discord.Interaction, modo: Literal['Desativado', 'Música', 'Fila']):
+        guild_id = interaction.guild_id
+        if modo == 'Desativado':
+            self.loop_modes[guild_id] = 'off'
+            await interaction.response.send_message("➡️ Loop **desativado**.")
+        elif modo == 'Música':
+            self.loop_modes[guild_id] = 'track'
+            await interaction.response.send_message("🔂 Loop de **Música** ativado!")
+        elif modo == 'Fila':
+            self.loop_modes[guild_id] = 'queue'
+            await interaction.response.send_message("🔁 Loop de **Fila** ativado!")
+
+    @karaoke_group.command(name="parar", description="Para a música, limpa a fila e sai do canal de voz")
     async def parar(self, interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        self.queues[guild_id] = []
+        self.loop_modes[guild_id] = 'off'
+        self.current.pop(guild_id, None)
+        
         vc = interaction.guild.voice_client
         if vc and vc.is_connected():
+            vc.stop()
             await vc.disconnect()
-            await interaction.response.send_message("Karaokê encerrado! 👋")
+            await interaction.response.send_message("👋 Fila limpa e música parada. Saindo do canal!")
         else:
-            await interaction.response.send_message("Não estou em um canal de voz.", ephemeral=True)
+            await interaction.response.send_message("Eu não estou em um canal de voz.", ephemeral=True)
 
     @karaoke_group.command(name="letra", description="Busca a letra de uma música")
     @app_commands.describe(musica="Nome da música (ex: Artista - Música)")
     async def letra(self, interaction: discord.Interaction, musica: str):
         await interaction.response.defer()
-        lyrics = await self.get_lyrics(musica)
+        
+        url = f"https://lrclib.net/api/search?q={urllib.parse.quote(musica)}"
+        lyrics = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data: lyrics = data[0].get('plainLyrics') or data[0].get('syncedLyrics')
+        except Exception: pass
+        
         if lyrics:
             if len(lyrics) > 4000:
                 lyrics = lyrics[:4000] + "\n...\n*(Cortada por limite de caracteres)*"
@@ -266,24 +398,19 @@ class Karaoke(commands.Cog):
                 await interaction.channel.send(f"⏳ Tempo esgotado! Resposta: **{song['resposta']}**.")
                 return
 
-    # ─────────────────────────────────────────────────────────────────────────
     @app_commands.command(name="batalha_rap", description="Desafie alguém para uma Batalha de Rap!")
     @app_commands.describe(adversario="O usuário que você vai desafiar")
     async def batalha_rap(self, interaction: discord.Interaction, adversario: discord.Member):
         if not interaction.user.voice:
-            await interaction.response.send_message("Você precisa estar em um canal de voz!", ephemeral=True)
-            return
+            return await interaction.response.send_message("Você precisa estar em um canal de voz!", ephemeral=True)
         if adversario.bot or adversario == interaction.user:
-            await interaction.response.send_message("Escolha um adversário válido.", ephemeral=True)
-            return
+            return await interaction.response.send_message("Escolha um adversário válido.", ephemeral=True)
         if not adversario.voice or adversario.voice.channel != interaction.user.voice.channel:
-            await interaction.response.send_message("Seu adversário precisa estar no mesmo canal!", ephemeral=True)
-            return
+            return await interaction.response.send_message("Seu adversário precisa estar no mesmo canal!", ephemeral=True)
 
         await interaction.response.defer()
         vc = await self._conectar_voz(interaction)
-        if vc is None:
-            return
+        if vc is None: return
 
         embed = discord.Embed(
             title="🎤🔥 BATALHA DE RAP 🔥🎤",
@@ -292,30 +419,27 @@ class Karaoke(commands.Cog):
         )
         msg = await interaction.followup.send(embed=embed, wait=True)
 
-        loop = asyncio.get_event_loop()
         filepath = None
         for q in ["ytsearch:rap freestyle beat instrumental", "ytsearch:hip hop beat 2024"]:
             try:
-                filepath, beat_title = await baixar_audio_local(loop, q)
+                filepath, beat_title = await baixar_audio_local(self.bot.loop, q)
                 break
             except Exception:
                 continue
 
         if not filepath:
             await msg.edit(embed=None, content="❌ Não encontrei nenhum beat. Tente novamente.")
-            if vc.is_connected():
-                await vc.disconnect()
+            if vc.is_connected(): await vc.disconnect()
             return
 
         def _depois_de_tocar_beat(err, fp):
-            if err: print(f"[Karaoke] Beat error: {err}")
             if os.path.isfile(fp):
                 try: os.remove(fp)
                 except: pass
 
         try:
             vc.play(discord.FFmpegPCMAudio(filepath, options="-vn"), after=lambda err: _depois_de_tocar_beat(err, filepath))
-
+            
             embed.description = (f"🎵 **{beat_title}**\n\n**ROUND 1** — {interaction.user.mention} rima!\n⏳ 30s")
             await msg.edit(embed=embed)
             await asyncio.sleep(30)
@@ -324,21 +448,16 @@ class Karaoke(commands.Cog):
             await msg.edit(embed=embed)
             await asyncio.sleep(30)
 
-            if vc.is_connected():
-                await vc.disconnect()
+            if vc.is_connected(): await vc.disconnect()
 
             embed.description = "🔥 **FIM!** Quem mandou melhor? Vote abaixo!"
             await msg.edit(embed=embed)
-            poll = await interaction.channel.send(
-                f"**{interaction.user.mention} 🆚 {adversario.mention}**\n1️⃣ Desafiante | 2️⃣ Adversário"
-            )
+            poll = await interaction.channel.send(f"**{interaction.user.mention} 🆚 {adversario.mention}**\n1️⃣ Desafiante | 2️⃣ Adversário")
             await poll.add_reaction("1️⃣")
             await poll.add_reaction("2️⃣")
         except Exception as e:
             await interaction.channel.send(f"❌ Erro na batalha: `{e}`")
-            if vc.is_connected():
-                await vc.disconnect()
-
+            if vc.is_connected(): await vc.disconnect()
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Karaoke(bot))
