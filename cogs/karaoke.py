@@ -23,7 +23,8 @@ YTDL_OPTIONS = {
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'auto'
+    'default_search': 'auto',
+    'extractor_args': {'youtube': ['player_client=android']}
 }
 
 FFMPEG_OPTIONS = {
@@ -47,15 +48,15 @@ class Karaoke(commands.Cog):
         self.bot = bot
         self.rap_battles = {}
 
-    async def get_lyrics(self, artist, title):
-        url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(artist)}/{urllib.parse.quote(title)}"
+    async def get_lyrics(self, query):
+        url = f"https://lrclib.net/api/search?q={urllib.parse.quote(query)}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=5) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if 'lyrics' in data:
-                            return data['lyrics'].strip()
+                        if data and len(data) > 0:
+                            return data[0].get('plainLyrics') or data[0].get('syncedLyrics')
         except Exception as e:
             print(f"Erro na letra: {e}")
             pass
@@ -129,20 +130,20 @@ class Karaoke(commands.Cog):
             await interaction.response.send_message("Eu não estou em um canal de voz.", ephemeral=True)
 
     @karaoke_group.command(name="letra", description="Busca a letra de uma música")
-    @app_commands.describe(cantor="Nome do artista/banda", musica="Nome da música")
-    async def letra(self, interaction: discord.Interaction, cantor: str, musica: str):
+    @app_commands.describe(musica="Nome da música (e artista se quiser ser específico)")
+    async def letra(self, interaction: discord.Interaction, musica: str):
         await interaction.response.defer()
-        lyrics = await self.get_lyrics(cantor, musica)
+        lyrics = await self.get_lyrics(musica)
         
         if lyrics:
             # Cut lyrics if too long
             if len(lyrics) > 4000:
                 lyrics = lyrics[:4000] + "...\n(Letra muito longa, cortada.)"
                 
-            embed = discord.Embed(title=f"🎤 Letra: {musica.title()} - {cantor.title()}", description=lyrics, color=BOT_COLOR)
+            embed = discord.Embed(title=f"🎤 Letra: {musica.title()}", description=lyrics, color=BOT_COLOR)
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("❌ Não consegui encontrar a letra dessa música. Verifique a grafia ou tente outra.")
+            await interaction.followup.send("❌ Não consegui encontrar a letra dessa música. Tente ser um pouco mais específico ou tente outra.")
 
     @karaoke_group.command(name="minigame", description="Complete o trecho da música e ganhe Sweet Coins!")
     async def minigame(self, interaction: discord.Interaction):
