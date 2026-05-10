@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 import random
 import urllib.parse
-from bs4 import BeautifulSoup
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -12,28 +12,116 @@ from config import BOT_COLOR, ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR, COIN_EM
 
 SWEET_COIN_EMOJI = "🍬"
 
-YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': 'True',
-    'extractaudio': True,
-    'audioformat': 'mp3',
-    'restrictfilenames': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'cookiefile': 'cookies.txt',
-    'extractor_args': {'youtube': ['player_client=tv,web']}
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# Estratégias de extração ordenadas por prioridade.
+# Cada uma tem suas próprias opções para contornar diferentes tipos de bloqueio.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_ytdl(extra_opts: dict) -> yt_dlp.YoutubeDL:
+    base = {
+        'noplaylist': True,
+        'extractaudio': True,
+        'nocheckcertificate': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'quiet': True,
+        'no_warnings': True,
+        'default_search': 'auto',
+        'socket_timeout': 15,
+    }
+    # Adiciona cookies se existirem
+    if os.path.isfile('cookies.txt'):
+        base['cookiefile'] = 'cookies.txt'
+    base.update(extra_opts)
+    return yt_dlp.YoutubeDL(base)
+
+
+# Estratégia 1 – Formato mais compatível (stream direto, sem DASH merge)
+# Prefere m4a/mp4/webm que são servidos via URL direta sem necessidade de ffmpeg merge
+STRATEGY_DIRECT = _make_ytdl({
+    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio/best[ext=m4a]/best',
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['tv_embedded', 'web'],
+        }
+    },
+})
+
+# Estratégia 2 – Força player Android (bypassa alguns bloqueios de datacenter)
+STRATEGY_ANDROID = _make_ytdl({
+    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android'],
+        }
+    },
+})
+
+# Estratégia 3 – Aceita qualquer formato disponível (último recurso)
+STRATEGY_ANY = _make_ytdl({
+    'format': 'best[height<=480]/best',
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['tv_embedded', 'android', 'web'],
+        }
+    },
+})
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
+    'before_options': (
+        '-reconnect 1 '
+        '-reconnect_streamed 1 '
+        '-reconnect_delay_max 5 '
+        '-timeout 15000000'
+    ),
+    'options': '-vn -bufsize 64k'
 }
 
-ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+async def extrair_url_audio(loop: asyncio.AbstractEventLoop, query: str) -> tuple[str, str]:
+    """
+    Tenta extrair a URL de áudio usando múltiplas estratégias.
+    Retorna (url_do_stream, titulo).
+    Levanta Exception se nenhuma estratégia funcionar.
+    """
+    estrategias = [
+        ("YouTube Direct", STRATEGY_DIRECT, query),
+        ("YouTube Android", STRATEGY_ANDROID, query),
+        ("YouTube Any",    STRATEGY_ANY,    query),
+    ]
+
+    ultimo_erro = None
+    for nome, ytdl_inst, q in estrategias:
+        try:
+            print(f"[Karaoke] Tentando estratégia: {nome} | query: {q}")
+            data = await loop.run_in_executor(
+                None, lambda inst=ytdl_inst, qr=q: inst.extract_info(qr, download=False)
+            )
+            if not data:
+                raise ValueError("Nenhum dado retornado")
+
+            # Desembrulha playlists / listas de busca
+            if 'entries' in data:
+                entries = [e for e in data['entries'] if e]
+                if not entries:
+                    raise ValueError("Lista de resultados vazia")
+                data = entries[0]
+
+            url = data.get('url') or data.get('webpage_url')
+            if not url:
+                raise ValueError("URL de stream não encontrada nos dados")
+
+            title = data.get('title', q)
+            print(f"[Karaoke] ✅ Sucesso com '{nome}': {title}")
+            return url, title
+
+        except Exception as e:
+            print(f"[Karaoke] ❌ Falhou '{nome}': {e}")
+            ultimo_erro = e
+            continue
+
+    raise Exception(f"Todas as estratégias falharam. Último erro: {ultimo_erro}")
+
 
 MINIGAME_SONGS = [
     {"trecho": "E nessa loucura de dizer que não te quero...", "resposta": "vou negando as aparências"},
@@ -49,110 +137,111 @@ class Karaoke(commands.Cog):
         self.bot = bot
         self.rap_battles = {}
 
-    async def get_lyrics(self, query):
+    async def get_lyrics(self, query: str) -> str | None:
         url = f"https://lrclib.net/api/search?q={urllib.parse.quote(query)}"
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if data and len(data) > 0:
+                        if data:
                             return data[0].get('plainLyrics') or data[0].get('syncedLyrics')
         except Exception as e:
-            print(f"Erro na letra: {e}")
-            pass
+            print(f"[Karaoke] Erro na letra: {e}")
         return None
 
+    async def _conectar_voz(self, interaction: discord.Interaction) -> discord.VoiceClient | None:
+        """Conecta ao canal de voz do usuário e retorna o VoiceClient, ou None em caso de falha."""
+        if not interaction.user.voice:
+            await interaction.followup.send("❌ Você precisa estar em um canal de voz primeiro!", ephemeral=True)
+            return None
+
+        channel = interaction.user.voice.channel
+        try:
+            try:
+                vc = await channel.connect()
+            except discord.ClientException:
+                vc = interaction.guild.voice_client
+                if vc and vc.channel != channel:
+                    await vc.move_to(channel)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Não consegui conectar ao canal de voz: `{e}`", ephemeral=True)
+            return None
+
+        if vc and vc.is_playing():
+            vc.stop()
+
+        return vc
+
+    # ──────────────────────────────────────────────────────────────────────────
     karaoke_group = app_commands.Group(name="karaoke", description="Sistema de Karaokê")
 
     @karaoke_group.command(name="vplay", description="Entra no canal de voz e toca uma música/karaokê do YouTube")
-    @app_commands.describe(musica="Nome da música que deseja tocar")
+    @app_commands.describe(musica="Nome ou URL da música que deseja tocar")
     async def tocar(self, interaction: discord.Interaction, musica: str):
-        print("KARAOKE COMANDO RECEBIDO LOCALMENTE!!!")
         await interaction.response.defer()
-        
-        if not interaction.user.voice:
-            await interaction.followup.send("Você precisa estar em um canal de voz primeiro!", ephemeral=True)
+
+        vc = await self._conectar_voz(interaction)
+        if vc is None:
             return
 
-        channel = interaction.user.voice.channel
-
-        try:
-            try:
-                voice_client = await channel.connect()
-            except discord.ClientException:
-                voice_client = interaction.guild.voice_client
-                if voice_client and voice_client.channel != channel:
-                    await voice_client.move_to(channel)
-        except Exception as e:
-            import sys
-            await interaction.followup.send(f"❌ Erro de voz. Você está usando o Python do VSCode ({sys.executable}) em vez do Python correto! Detalhe: {e}", ephemeral=True)
-            return
-
-        if voice_client and voice_client.is_playing():
-            voice_client.stop()
-
-        await interaction.followup.send(f"🔍 Procurando por **{musica}**...")
+        status_msg = await interaction.followup.send(f"🔍 Procurando por **{musica}**...")
 
         loop = asyncio.get_event_loop()
+        # Prepara a query (URL direta ou busca)
+        query = musica if musica.startswith("http") else f"ytsearch:{musica}"
+
         try:
-            yt_query = musica if "http" in musica else f"ytsearch:{musica}"
-            try:
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(yt_query, download=False))
-            except Exception as e:
-                if "http" in musica:
-                    await interaction.channel.send("❌ Não consegui acessar essa URL (possível restrição do YouTube/SoundCloud).")
-                    if voice_client.is_connected():
-                        await voice_client.disconnect()
-                    return
-                await interaction.channel.send("⚠️ YouTube falhou (bloqueio ou erro de formato). Buscando áudio alternativo (SoundCloud)...")
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{musica}", download=False))
-                    
-            if 'entries' in data and len(data['entries']) > 0:
-                data = data['entries'][0]
-
-            url2 = data['url']
-            title = data.get('title', musica)
-
-            source = discord.FFmpegPCMAudio(url2, **FFMPEG_OPTIONS)
-            voice_client.play(source, after=lambda e: print(f'Player error: {e}') if e else None)
-
-            embed = discord.Embed(title="🎶 Karaokê Iniciado", description=f"Tocando agora: **{title}**", color=BOT_COLOR)
-            await interaction.channel.send(embed=embed)
+            stream_url, title = await extrair_url_audio(loop, query)
         except Exception as e:
-            await interaction.channel.send(f"❌ Ocorreu um erro ao reproduzir o áudio. (Nenhuma música encontrada ou bloqueio ativo)")
-            if voice_client.is_connected():
-                await voice_client.disconnect()
+            await status_msg.edit(content=f"❌ Não encontrei nenhum áudio disponível para **{musica}**.\n> {e}")
+            if vc.is_connected():
+                await vc.disconnect()
+            return
+
+        try:
+            source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+            vc.play(source, after=lambda err: print(f"[Karaoke] Player error: {err}") if err else None)
+
+            embed = discord.Embed(
+                title="🎶 Karaokê Iniciado",
+                description=f"Tocando agora: **{title}**",
+                color=BOT_COLOR
+            )
+            embed.set_footer(text="Use /karaoke parar para encerrar a música.")
+            await status_msg.edit(content=None, embed=embed)
+        except Exception as e:
+            await status_msg.edit(content=f"❌ Erro ao iniciar a reprodução: `{e}`")
+            if vc.is_connected():
+                await vc.disconnect()
 
     @karaoke_group.command(name="parar", description="Para a música atual e sai do canal de voz")
     async def parar(self, interaction: discord.Interaction):
-        voice_client = interaction.guild.voice_client
-        if voice_client and voice_client.is_connected():
-            await voice_client.disconnect()
+        vc = interaction.guild.voice_client
+        if vc and vc.is_connected():
+            await vc.disconnect()
             await interaction.response.send_message("Karaokê encerrado. Saindo do canal de voz! 👋")
         else:
             await interaction.response.send_message("Eu não estou em um canal de voz.", ephemeral=True)
 
     @karaoke_group.command(name="letra", description="Busca a letra de uma música")
-    @app_commands.describe(musica="Nome da música (e artista se quiser ser específico)")
+    @app_commands.describe(musica="Nome da música (e artista para ser mais específico)")
     async def letra(self, interaction: discord.Interaction, musica: str):
         await interaction.response.defer()
         lyrics = await self.get_lyrics(musica)
-        
+
         if lyrics:
-            # Cut lyrics if too long
             if len(lyrics) > 4000:
-                lyrics = lyrics[:4000] + "...\n(Letra muito longa, cortada.)"
-                
+                lyrics = lyrics[:4000] + "\n...\n*(Letra muito longa, cortada.)*"
             embed = discord.Embed(title=f"🎤 Letra: {musica.title()}", description=lyrics, color=BOT_COLOR)
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("❌ Não consegui encontrar a letra dessa música. Tente ser um pouco mais específico ou tente outra.")
+            await interaction.followup.send("❌ Não encontrei a letra. Tente ser mais específico, ex: `Artista - Música`.")
 
     @karaoke_group.command(name="minigame", description="Complete o trecho da música e ganhe Sweet Coins!")
     async def minigame(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        
+
         song = random.choice(MINIGAME_SONGS)
         embed = discord.Embed(
             title="🎤 Qual é a música?",
@@ -161,7 +250,7 @@ class Karaoke(commands.Cog):
         )
         await interaction.followup.send(embed=embed)
 
-        def check(m):
+        def check(m: discord.Message):
             return m.channel == interaction.channel and not m.author.bot
 
         end_time = asyncio.get_event_loop().time() + 20.0
@@ -170,50 +259,43 @@ class Karaoke(commands.Cog):
             if timeout <= 0:
                 await interaction.channel.send(f"⏳ Tempo esgotado! A resposta correta era: **{song['resposta']}**.")
                 return
-            
             try:
                 msg = await self.bot.wait_for('message', timeout=timeout, check=check)
                 if song['resposta'].lower() in msg.content.lower():
                     reward = random.randint(30, 80)
                     await self.bot.db.add_coins(msg.author.id, interaction.guild_id, reward)
-                    await interaction.channel.send(f"🎉 Correto, {msg.author.mention}! A letra era **{song['resposta']}**!\nVocê ganhou {SWEET_COIN_EMOJI} **{reward} Sweet Coins**!")
+                    await interaction.channel.send(
+                        f"🎉 Correto, {msg.author.mention}! A letra era **{song['resposta']}**!\n"
+                        f"Você ganhou {SWEET_COIN_EMOJI} **{reward} Sweet Coins**!"
+                    )
                     return
             except asyncio.TimeoutError:
-                await interaction.channel.send(f"⏳ Tempo esgotado! Ninguém acertou. A resposta correta era: **{song['resposta']}**.")
+                await interaction.channel.send(f"⏳ Tempo esgotado! Ninguém acertou. A resposta era: **{song['resposta']}**.")
                 return
 
-    # ── Batalha de Rap ──
+    # ──────────────────────────────────────────────────────────────────────────
+    # Batalha de Rap
+    # ──────────────────────────────────────────────────────────────────────────
     @app_commands.command(name="batalha_rap", description="Desafie alguém para uma Batalha de Rap no canal de voz!")
     @app_commands.describe(adversario="O usuário que você vai desafiar")
     async def batalha_rap(self, interaction: discord.Interaction, adversario: discord.Member):
         if not interaction.user.voice:
-            await interaction.response.send_message("Você precisa estar em um canal de voz para começar uma Batalha de Rap!", ephemeral=True)
+            await interaction.response.send_message("Você precisa estar em um canal de voz!", ephemeral=True)
             return
-            
+
         if adversario.bot or adversario == interaction.user:
             await interaction.response.send_message("Escolha um adversário válido.", ephemeral=True)
             return
 
         if adversario.voice is None or adversario.voice.channel != interaction.user.voice.channel:
-            await interaction.response.send_message("O seu adversário precisa estar no mesmo canal de voz que você!", ephemeral=True)
+            await interaction.response.send_message("Seu adversário precisa estar no mesmo canal de voz!", ephemeral=True)
             return
 
         await interaction.response.defer()
 
-        channel = interaction.user.voice.channel
-        try:
-            try:
-                voice_client = await channel.connect()
-            except discord.ClientException:
-                voice_client = interaction.guild.voice_client
-                if voice_client and voice_client.channel != channel:
-                    await voice_client.move_to(channel)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Não consegui conectar ao canal de voz. Detalhe do erro: {e}", ephemeral=True)
+        vc = await self._conectar_voz(interaction)
+        if vc is None:
             return
-
-        if voice_client and voice_client.is_playing():
-            voice_client.stop()
 
         embed = discord.Embed(
             title="🎤🔥 BATALHA DE RAP 🔥🎤",
@@ -223,45 +305,72 @@ class Karaoke(commands.Cog):
         msg = await interaction.followup.send(embed=embed, wait=True)
 
         loop = asyncio.get_event_loop()
-        try:
-            # Pegando um beat famoso genérico no YouTube ou SoundCloud
-            beat_search = "rap freestyle beat instrumental"
-            try:
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{beat_search}", download=False))
-            except Exception as e:
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{beat_search}", download=False))
-                
-            if 'entries' in data and len(data['entries']) > 0:
-                data = data['entries'][0]
+        # Beats genéricos para tentar em sequência
+        beat_queries = [
+            "ytsearch:rap freestyle beat instrumental no copyright",
+            "ytsearch:hip hop beat instrumental 2024",
+            "ytsearch:trap beat instrumental",
+        ]
 
-            source = discord.FFmpegPCMAudio(data['url'], **FFMPEG_OPTIONS)
-            voice_client.play(source)
+        stream_url = None
+        beat_title = "Beat"
+        for q in beat_queries:
+            try:
+                stream_url, beat_title = await extrair_url_audio(loop, q)
+                break
+            except Exception as e:
+                print(f"[BatalhaRap] Beat falhou '{q}': {e}")
+                continue
+
+        if not stream_url:
+            await msg.edit(embed=None, content="❌ Não consegui encontrar nenhum beat. Tente novamente mais tarde.")
+            if vc.is_connected():
+                await vc.disconnect()
+            return
+
+        try:
+            source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+            vc.play(source)
 
             # Round 1
-            embed.description = f"**ROUND 1**\n\nÉ a vez de {interaction.user.mention} rimar!\n⏳ Você tem **30 segundos**!"
+            embed.description = (
+                f"🎵 Beat: **{beat_title}**\n\n"
+                f"**ROUND 1** — É a vez de {interaction.user.mention} rimar!\n"
+                f"⏳ Você tem **30 segundos**!"
+            )
             await msg.edit(embed=embed)
             await asyncio.sleep(30)
 
             # Round 2
-            embed.description = f"**ROUND 2**\n\nAgora é a vez de {adversario.mention} mandar a rima!\n⏳ Você tem **30 segundos**!"
+            embed.description = (
+                f"🎵 Beat: **{beat_title}**\n\n"
+                f"**ROUND 2** — Agora é a vez de {adversario.mention} mandar a rima!\n"
+                f"⏳ Você tem **30 segundos**!"
+            )
             await msg.edit(embed=embed)
             await asyncio.sleep(30)
 
-            if voice_client.is_connected():
-                await voice_client.disconnect()
+            if vc.is_connected():
+                await vc.disconnect()
 
-            # Poll
-            embed.description = "🔥 **FIM DA BATALHA!** 🔥\n\nO Beat acabou! Quem mandou a melhor rima? Votem nas reações abaixo!"
+            embed.description = (
+                "🔥 **FIM DA BATALHA!** 🔥\n\n"
+                "O Beat acabou! Quem mandou a melhor rima?\nVotem nas reações abaixo!"
+            )
             await msg.edit(embed=embed)
-            
-            poll_msg = await interaction.channel.send(f"Votação da Batalha de Rap: {interaction.user.mention} 🆚 {adversario.mention}\n\n1️⃣ para votar no Desafiante\n2️⃣ para votar no Adversário")
+
+            poll_msg = await interaction.channel.send(
+                f"**Votação:** {interaction.user.mention} 🆚 {adversario.mention}\n\n"
+                f"1️⃣ → Desafiante | 2️⃣ → Adversário"
+            )
             await poll_msg.add_reaction("1️⃣")
             await poll_msg.add_reaction("2️⃣")
 
         except Exception as e:
-            await interaction.channel.send(f"❌ Ocorreu um erro ao puxar o beat (FFmpeg/Yt-Dlp). {e}")
-            if voice_client.is_connected():
-                await voice_client.disconnect()
+            await interaction.channel.send(f"❌ Erro durante a batalha: `{e}`")
+            if vc.is_connected():
+                await vc.disconnect()
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Karaoke(bot))
