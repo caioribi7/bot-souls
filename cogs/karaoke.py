@@ -96,9 +96,15 @@ class Karaoke(commands.Cog):
 
         loop = asyncio.get_event_loop()
         try:
+            yt_query = musica if "http" in musica else f"ytsearch:{musica}"
             try:
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{musica}", download=False))
+                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(yt_query, download=False))
             except Exception as e:
+                if "http" in musica:
+                    await interaction.channel.send("❌ Não consegui acessar essa URL (possível restrição do YouTube/SoundCloud).")
+                    if voice_client.is_connected():
+                        await voice_client.disconnect()
+                    return
                 await interaction.channel.send("⚠️ YouTube falhou (bloqueio ou erro de formato). Buscando áudio alternativo (SoundCloud)...")
                 data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"scsearch:{musica}", download=False))
                     
@@ -114,7 +120,7 @@ class Karaoke(commands.Cog):
             embed = discord.Embed(title="🎶 Karaokê Iniciado", description=f"Tocando agora: **{title}**", color=BOT_COLOR)
             await interaction.channel.send(embed=embed)
         except Exception as e:
-            await interaction.channel.send(f"❌ Ocorreu um erro ao reproduzir o áudio. (FFmpeg pode estar faltando na máquina: {e})")
+            await interaction.channel.send(f"❌ Ocorreu um erro ao reproduzir o áudio. (Nenhuma música encontrada ou bloqueio ativo)")
             if voice_client.is_connected():
                 await voice_client.disconnect()
 
