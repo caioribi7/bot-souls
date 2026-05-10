@@ -12,15 +12,21 @@ from config import BOT_COLOR, ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR, COIN_EM
 
 SWEET_COIN_EMOJI = "🍬"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Estratégias de extração ordenadas por prioridade.
-# Cada uma tem suas próprias opções para contornar diferentes tipos de bloqueio.
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── DIAGNÓSTICO / SOLUÇÃO ───────────────────────────────────────────────────────────────
+# Sem JS runtime: bestaudio/* são formatos DASH e falham.
+# Único formato que funciona é o 18 (mp4 progressivo, audio+video na mesma URL).
+# Porém: android_vr/android NÃO SUPORTAM cookies, então com cookiefile o yt-dlp
+# pula esses clientes e só sobram storyboards. Solução:
+#   - Estratégias primárias usam android_vr/android SEM cookies (funciona)
+#   - Estratégias secundárias usam web/tv_embedded COM cookies (fallback)
+# ────────────────────────────────────────────────────────────────────────
 
-def _make_ytdl(extra_opts: dict) -> yt_dlp.YoutubeDL:
+# Formato progressivo (sem DASH, sem JS): mp4 com áudio+vídeo na mesma URL
+_FORMAT_NO_JS = '18/best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best'
+
+def _make_ytdl(extra_opts: dict, use_cookies: bool = False) -> yt_dlp.YoutubeDL:
     base = {
         'noplaylist': True,
-        'extractaudio': True,
         'nocheckcertificate': True,
         'ignoreerrors': False,
         'logtostderr': False,
@@ -29,43 +35,35 @@ def _make_ytdl(extra_opts: dict) -> yt_dlp.YoutubeDL:
         'default_search': 'auto',
         'socket_timeout': 15,
     }
-    # Adiciona cookies se existirem
-    if os.path.isfile('cookies.txt'):
+    if use_cookies and os.path.isfile('cookies.txt'):
         base['cookiefile'] = 'cookies.txt'
     base.update(extra_opts)
     return yt_dlp.YoutubeDL(base)
 
 
-# Estratégia 1 – Formato mais compatível (stream direto, sem DASH merge)
-# Prefere m4a/mp4/webm que são servidos via URL direta sem necessidade de ffmpeg merge
-STRATEGY_DIRECT = _make_ytdl({
-    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio/best[ext=m4a]/best',
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['tv_embedded', 'web'],
-        }
-    },
-})
+# ── Estratégia 1: android_vr SEM cookies (formato 18, testado e funcionando) ──
+STRATEGY_ANDROID_VR = _make_ytdl({
+    'format': _FORMAT_NO_JS,
+    'extractor_args': {'youtube': {'player_client': ['android_vr']}},
+}, use_cookies=False)
 
-# Estratégia 2 – Força player Android (bypassa alguns bloqueios de datacenter)
+# ── Estratégia 2: android SEM cookies (fallback do android_vr) ────────────
 STRATEGY_ANDROID = _make_ytdl({
-    'format': 'bestaudio[ext=m4a]/bestaudio/best',
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android'],
-        }
-    },
-})
+    'format': _FORMAT_NO_JS,
+    'extractor_args': {'youtube': {'player_client': ['android_vr', 'android']}},
+}, use_cookies=False)
 
-# Estratégia 3 – Aceita qualquer formato disponível (último recurso)
+# ── Estratégia 3: tv_embedded COM cookies (usa JS quando disponível) ───────
+STRATEGY_TV = _make_ytdl({
+    'format': _FORMAT_NO_JS,
+    'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
+}, use_cookies=True)
+
+# ── Estratégia 4: fallback absoluto sem qualquer restrição ─────────────
 STRATEGY_ANY = _make_ytdl({
-    'format': 'best[height<=480]/best',
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['tv_embedded', 'android', 'web'],
-        }
-    },
-})
+    'format': 'best[ext=mp4]/best',
+    'extractor_args': {'youtube': {'player_client': ['android_vr', 'tv_embedded', 'android']}},
+}, use_cookies=False)
 
 FFMPEG_OPTIONS = {
     'before_options': (
@@ -85,9 +83,10 @@ async def extrair_url_audio(loop: asyncio.AbstractEventLoop, query: str) -> tupl
     Levanta Exception se nenhuma estratégia funcionar.
     """
     estrategias = [
-        ("YouTube Direct", STRATEGY_DIRECT, query),
-        ("YouTube Android", STRATEGY_ANDROID, query),
-        ("YouTube Any",    STRATEGY_ANY,    query),
+        ("Android VR (sem cookies)",  STRATEGY_ANDROID_VR, query),
+        ("Android (sem cookies)",     STRATEGY_ANDROID,    query),
+        ("TV Embedded (com cookies)", STRATEGY_TV,         query),
+        ("Any (fallback absoluto)",   STRATEGY_ANY,        query),
     ]
 
     ultimo_erro = None
