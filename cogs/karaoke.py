@@ -24,6 +24,7 @@ YTDL_OPTIONS = {
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
+    'cookiefile': 'cookies.txt',
     'extractor_args': {'youtube': ['player_client=android']}
 }
 
