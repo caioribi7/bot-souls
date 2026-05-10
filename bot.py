@@ -42,6 +42,7 @@ class CommunityBot(commands.Bot):
             "cogs.guide",
             "cogs.soulsbets",
             "cogs.testes",
+            "cogs.fight",
         ]
         for cog in cogs:
             try:
