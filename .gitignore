@@ -16,3 +16,8 @@ env/
 .DS_Store
 .idea/
 .vscode/
+bot_env/
+bot_env/
+bot_output*
+test_nacl.py
+apt.txt

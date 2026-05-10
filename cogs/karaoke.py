@@ -63,9 +63,10 @@ class Karaoke(commands.Cog):
 
     karaoke_group = app_commands.Group(name="karaoke", description="Sistema de Karaokê")
 
-    @karaoke_group.command(name="tocar", description="Entra no canal de voz e toca uma música/karaokê do YouTube")
+    @karaoke_group.command(name="vplay", description="Entra no canal de voz e toca uma música/karaokê do YouTube")
     @app_commands.describe(musica="Nome da música que deseja tocar")
     async def tocar(self, interaction: discord.Interaction, musica: str):
+        print("KARAOKE COMANDO RECEBIDO LOCALMENTE!!!")
         await interaction.response.defer()
         
         if not interaction.user.voice:
@@ -82,7 +83,8 @@ class Karaoke(commands.Cog):
                 if voice_client and voice_client.channel != channel:
                     await voice_client.move_to(channel)
         except Exception as e:
-            await interaction.followup.send(f"❌ Não consegui conectar ao canal de voz. Detalhe do erro: {e}", ephemeral=True)
+            import sys
+            await interaction.followup.send(f"❌ Erro de voz. Você está usando o Python do VSCode ({sys.executable}) em vez do Python correto! Detalhe: {e}", ephemeral=True)
             return
 
         if voice_client and voice_client.is_playing():
