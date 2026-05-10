@@ -302,6 +302,15 @@ class Database:
                     payout      INTEGER DEFAULT 0,
                     placed_at   TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS fight_builds (
+                    user_id      INTEGER PRIMARY KEY,
+                    pts_soco     INTEGER DEFAULT 0,
+                    pts_chute    INTEGER DEFAULT 0,
+                    pts_bloqueio INTEGER DEFAULT 0,
+                    pts_esquiva  INTEGER DEFAULT 0,
+                    special_id   INTEGER DEFAULT 1
+                );
             """)
             await db.commit()
 
@@ -1526,3 +1535,41 @@ class Database:
                 (user_id, guild_id, limit),
             ) as cur:
                 return [dict(r) for r in await cur.fetchall()]
+
+    # ── Fight Builds ─────────────────────────────────────────────────────────
+
+    async def get_fight_build(self, user_id: int) -> dict:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM fight_builds WHERE user_id=?", (user_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if row:
+                return dict(row)
+            # Default build
+            return {
+                "user_id": user_id,
+                "pts_soco": 0,
+                "pts_chute": 0,
+                "pts_bloqueio": 0,
+                "pts_esquiva": 0,
+                "special_id": 1,
+            }
+
+    async def save_fight_build(self, user_id: int, soco: int, chute: int, bloqueio: int, esquiva: int, special_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """
+                INSERT INTO fight_builds (user_id, pts_soco, pts_chute, pts_bloqueio, pts_esquiva, special_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    pts_soco=excluded.pts_soco,
+                    pts_chute=excluded.pts_chute,
+                    pts_bloqueio=excluded.pts_bloqueio,
+                    pts_esquiva=excluded.pts_esquiva,
+                    special_id=excluded.special_id
+                """,
+                (user_id, soco, chute, bloqueio, esquiva, special_id),
+            )
+            await db.commit()
