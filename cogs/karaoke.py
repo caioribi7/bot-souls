@@ -38,11 +38,10 @@ print(f"[Karaoke] Cache EJS: {os.path.join(_CACHE_DIR, 'challenge-solver', 'lib.
       f"→ {'✅' if os.path.isfile(os.path.join(_CACHE_DIR, 'challenge-solver', 'lib.json')) else '❌ AUSENTE'}")
 
 
-def _make_ytdl_web() -> yt_dlp.YoutubeDL:
-    """
-    Web client + cookies + Node.js + EJS local — funciona em datacenter.
-    """
-    opts: dict = {
+import uuid
+
+def _get_ytdl_opts(is_web: bool, outtmpl: str) -> dict:
+    opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'noplaylist': True,
         'nocheckcertificate': True,
@@ -51,79 +50,65 @@ def _make_ytdl_web() -> yt_dlp.YoutubeDL:
         'no_warnings': True,
         'default_search': 'auto',
         'socket_timeout': 20,
-        'cache_dir': _CACHE_DIR,
-        'extractor_args': {'youtube': {'player_client': ['web']}},
-        'remote_components': ['ejs:github'],    # usa cache se disponível
+        'outtmpl': outtmpl,
     }
-    if os.path.isfile(_COOKIE_FILE):
-        opts['cookiefile'] = _COOKIE_FILE
-    if _NODE_PATH:
-        opts['js_runtimes'] = {'node': {'path': _NODE_PATH}}
-    return yt_dlp.YoutubeDL(opts)
+    
+    if is_web:
+        opts.update({
+            'cache_dir': _CACHE_DIR,
+            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'remote_components': ['ejs:github'],
+        })
+        if os.path.isfile(_COOKIE_FILE):
+            opts['cookiefile'] = _COOKIE_FILE
+        if _NODE_PATH:
+            opts['js_runtimes'] = {'node': {'path': _NODE_PATH}}
+    else:
+        opts.update({
+            'format': '18/best[vcodec!=none][acodec!=none][ext=mp4]/best',
+            'extractor_args': {'youtube': {'player_client': ['android_vr', 'android']}},
+        })
+    
+    return opts
 
-
-def _make_ytdl_android() -> yt_dlp.YoutubeDL:
+async def baixar_audio_local(loop: asyncio.AbstractEventLoop, query: str) -> tuple[str, str]:
     """
-    Fallback android_vr sem cookies — funciona em IPs residenciais / locais.
+    Baixa o áudio localmente para evitar erro 403 do FFmpeg (falta de cookies).
+    Retorna (caminho_do_arquivo, titulo).
     """
-    return yt_dlp.YoutubeDL({
-        'format': '18/best[vcodec!=none][acodec!=none][ext=mp4]/best',
-        'noplaylist': True,
-        'nocheckcertificate': True,
-        'ignoreerrors': False,
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'auto',
-        'socket_timeout': 20,
-        'extractor_args': {'youtube': {'player_client': ['android_vr', 'android']}},
-        # SEM cookiefile — android não suporta cookies
-    })
-
-
-YTDL_WEB     = _make_ytdl_web()
-YTDL_ANDROID = _make_ytdl_android()
-
-FFMPEG_OPTIONS = {
-    'before_options': (
-        '-reconnect 1 '
-        '-reconnect_streamed 1 '
-        '-reconnect_delay_max 5 '
-        '-timeout 20000000'
-    ),
-    'options': '-vn -bufsize 64k'
-}
-
-
-async def extrair_url_audio(loop: asyncio.AbstractEventLoop, query: str) -> tuple[str, str]:
-    """
-    Tenta extrair URL de stream de áudio em ordem de prioridade.
-    Retorna (url, titulo) ou levanta Exception.
-    """
+    file_id = str(uuid.uuid4())[:8]
+    outtmpl = f"karaoke_{file_id}_%(id)s.%(ext)s"
+    
     estrategias = [
-        ("Web+EJS+cookies (datacenter)", YTDL_WEB),
-        ("AndroidVR sem cookies (local)",  YTDL_ANDROID),
+        ("Web+EJS+cookies (datacenter)", True),
+        ("AndroidVR sem cookies (local)", False),
     ]
 
     erros: list[str] = []
-    for nome, inst in estrategias:
+    for nome, is_web in estrategias:
         try:
-            print(f"[Karaoke] Tentando: {nome}")
-            data = await loop.run_in_executor(
-                None, lambda i=inst, q=query: i.extract_info(q, download=False)
-            )
-            if not data:
-                raise ValueError("Sem dados retornados")
-            if 'entries' in data:
-                entries = [e for e in data.get('entries', []) if e]
-                if not entries:
-                    raise ValueError("Lista de resultados vazia")
-                data = entries[0]
-            url = data.get('url')
-            if not url:
-                raise ValueError("URL de stream não encontrada")
-            title = data.get('title', query)
-            print(f"[Karaoke] ✅ {nome} → '{title}'")
-            return url, title
+            print(f"[Karaoke] Baixando via: {nome}")
+            opts = _get_ytdl_opts(is_web, outtmpl)
+            
+            def _download():
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    data = ydl.extract_info(query, download=True)
+                    if not data:
+                        raise ValueError("Sem dados retornados")
+                    if 'entries' in data:
+                        entries = [e for e in data.get('entries', []) if e]
+                        if not entries:
+                            raise ValueError("Lista de resultados vazia")
+                        data = entries[0]
+                    return ydl.prepare_filename(data), data.get('title', query)
+
+            filepath, title = await loop.run_in_executor(None, _download)
+            if filepath and os.path.isfile(filepath):
+                print(f"[Karaoke] ✅ Download concluído: {filepath}")
+                return filepath, title
+            else:
+                raise ValueError("Arquivo não foi salvo")
+                
         except Exception as e:
             msg = str(e)
             print(f"[Karaoke] ❌ {nome} falhou: {msg}")
@@ -193,16 +178,26 @@ class Karaoke(commands.Cog):
         query = musica if musica.startswith("http") else f"ytsearch:{musica}"
 
         try:
-            stream_url, title = await extrair_url_audio(loop, query)
+            filepath, title = await baixar_audio_local(loop, query)
         except Exception as e:
             await status_msg.edit(content=f"❌ Não encontrei áudio para **{musica}**.\n> {e}")
             if vc.is_connected():
                 await vc.disconnect()
             return
 
+        def _depois_de_tocar(err, fp):
+            if err:
+                print(f"[Karaoke] Player error: {err}")
+            if os.path.isfile(fp):
+                try:
+                    os.remove(fp)
+                except:
+                    pass
+
         try:
-            source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-            vc.play(source, after=lambda err: print(f"[Karaoke] Player error: {err}") if err else None)
+            source = discord.FFmpegPCMAudio(filepath, options="-vn")
+            vc.play(source, after=lambda err: _depois_de_tocar(err, filepath))
+
             embed = discord.Embed(
                 title="🎶 Karaokê Iniciado",
                 description=f"Tocando agora: **{title}**",
@@ -298,22 +293,28 @@ class Karaoke(commands.Cog):
         msg = await interaction.followup.send(embed=embed, wait=True)
 
         loop = asyncio.get_event_loop()
-        stream_url, beat_title = None, "Beat"
+        filepath = None
         for q in ["ytsearch:rap freestyle beat instrumental", "ytsearch:hip hop beat 2024"]:
             try:
-                stream_url, beat_title = await extrair_url_audio(loop, q)
+                filepath, beat_title = await baixar_audio_local(loop, q)
                 break
             except Exception:
                 continue
 
-        if not stream_url:
+        if not filepath:
             await msg.edit(embed=None, content="❌ Não encontrei nenhum beat. Tente novamente.")
             if vc.is_connected():
                 await vc.disconnect()
             return
 
+        def _depois_de_tocar_beat(err, fp):
+            if err: print(f"[Karaoke] Beat error: {err}")
+            if os.path.isfile(fp):
+                try: os.remove(fp)
+                except: pass
+
         try:
-            vc.play(discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS))
+            vc.play(discord.FFmpegPCMAudio(filepath, options="-vn"), after=lambda err: _depois_de_tocar_beat(err, filepath))
 
             embed.description = (f"🎵 **{beat_title}**\n\n**ROUND 1** — {interaction.user.mention} rima!\n⏳ 30s")
             await msg.edit(embed=embed)
